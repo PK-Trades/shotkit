@@ -1358,6 +1358,11 @@ async function doExport(kind: string) {
     kind,
     new Uint8Array(await blob.arrayBuffer()),
   );
+  // Copying is the "done" action: the image is on the clipboard, so close the editor.
+  if (kind === 'copy' && res?.ok) {
+    window.close();
+    return;
+  }
   if (res?.message) toast(res.message);
 }
 
