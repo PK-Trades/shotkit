@@ -7,13 +7,14 @@ import {
   deleteItem,
   exportToFolder,
   getItem,
-  historyDir,
+  historyIdOf,
   listHistory,
+  loadForEditing,
   savedPathFor,
+  saveEdits,
   thumbDataUrl,
   thumbPath,
   timestampName,
-  updateItem,
 } from './history';
 import { failedHotkeys, registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { ocrToClipboard, recognizeWords } from './ocr';
@@ -106,11 +107,13 @@ export function registerIpc() {
   ipcMain.handle('editor:load', (e) => {
     const file = editorFile(e.sender.id);
     if (!file) throw new Error('No image for this editor window');
-    const mime = MIME[path.extname(file).toLowerCase()] ?? 'image/png';
+    const { base, doc } = loadForEditing(file);
+    const mime = MIME[path.extname(base).toLowerCase()] ?? 'image/png';
     return {
       name: path.basename(file),
-      dataUrl: `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`,
+      dataUrl: `data:${mime};base64,${fs.readFileSync(base).toString('base64')}`,
       scale: screen.getPrimaryDisplay().scaleFactor,
+      doc,
     };
   });
 
@@ -118,21 +121,32 @@ export function registerIpc() {
     const file = editorFile(e.sender.id);
     if (!file) return [];
     try {
-      return await recognizeWords(nativeImage.createFromPath(file));
+      // Word positions must match the image the editor shows: the original, if it was edited before.
+      return await recognizeWords(nativeImage.createFromPath(loadForEditing(file).base));
     } catch (err) {
       console.warn('Word detection failed:', err);
       return [];
     }
   });
 
-  ipcMain.handle('editor:export',async (e, action: string, bytes: Uint8Array) => {
+  ipcMain.handle('editor:export', async (e, action: string, bytes: Uint8Array, docJson?: string) => {
     const png = Buffer.from(bytes);
     const img = nativeImage.createFromBuffer(png);
     const src = editorFile(e.sender.id);
     const win = BrowserWindow.fromWebContents(e.sender);
     const s = getSettings();
-    const inHistory = !!src && path.resolve(path.dirname(src)) === path.resolve(historyDir());
-    const base = src ? path.parse(src).name + (inHistory ? '' : ' (edited)') : timestampName();
+    const historyId = src ? historyIdOf(src) : null;
+    const base = src ? path.parse(src).name + (historyId ? '' : ' (edited)') : timestampName();
+
+    // Whatever the user does with the result, the capture in history keeps its annotations editable.
+    if (historyId && docJson) {
+      try {
+        saveEdits(historyId, png, docJson);
+        notifyHistoryChanged();
+      } catch (err) {
+        console.warn('Could not store edits:', err);
+      }
+    }
 
     switch (action) {
       case 'copy':
@@ -142,10 +156,6 @@ export function registerIpc() {
         fs.mkdirSync(s.saveFolder, { recursive: true });
         const target = path.join(s.saveFolder, `${base}.${s.format}`);
         fs.writeFileSync(target, s.format === 'jpg' ? img.toJPEG(92) : png);
-        if (inHistory && src) {
-          updateItem(path.basename(src), png);
-          notifyHistoryChanged();
-        }
         return { ok: true, message: `Saved to ${target}` };
       }
       case 'saveAs': {

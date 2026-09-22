@@ -40,6 +40,27 @@
       </section>
 
       <section>
+        <h2>Self-timer</h2>
+        <div class="row">
+          <label>Capture</label>
+          <select data-setting="timerMode">
+            <option value="area">Area</option>
+            <option value="window">Window</option>
+            <option value="fullscreen">Fullscreen</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Delay</label>
+          <select data-setting="timerDelay" data-number>
+            <option value="3">3 seconds</option>
+            <option value="5">5 seconds</option>
+            <option value="10">10 seconds</option>
+          </select>
+        </div>
+        <p class="note">Start the timer, then open the menu or hover the tooltip you want to capture.</p>
+      </section>
+
+      <section>
         <h2>Saving</h2>
         <div class="row folder">
           <label>Save folder</label>

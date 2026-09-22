@@ -2,7 +2,8 @@ import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type HotkeyAction = 'area' | 'window' | 'fullscreen' | 'scrolling' | 'ocr' | 'history';
+export type HotkeyAction = 'area' | 'window' | 'fullscreen' | 'scrolling' | 'ocr' | 'timer' | 'history';
+export type TimerMode = 'area' | 'window' | 'fullscreen';
 
 export interface Settings {
   hotkeys: Record<HotkeyAction, string>;
@@ -18,6 +19,9 @@ export interface Settings {
   showMagnifier: boolean;
   launchAtLogin: boolean;
   historyLimit: number;
+  /** Self-timer: what to capture, and after how many seconds. */
+  timerMode: TimerMode;
+  timerDelay: number;
 }
 
 function defaults(): Settings {
@@ -28,6 +32,7 @@ function defaults(): Settings {
       fullscreen: 'CommandOrControl+Shift+3',
       scrolling: 'CommandOrControl+Shift+6',
       ocr: 'CommandOrControl+Shift+2',
+      timer: 'CommandOrControl+Shift+7',
       history: '',
     },
     saveFolder: path.join(app.getPath('pictures'), 'ShotKit'),
@@ -41,6 +46,8 @@ function defaults(): Settings {
     showMagnifier: true,
     launchAtLogin: false,
     historyLimit: 200,
+    timerMode: 'area',
+    timerDelay: 5,
   };
 }
 

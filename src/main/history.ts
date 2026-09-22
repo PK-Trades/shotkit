@@ -29,6 +29,44 @@ function thumbsDir(): string {
 
 export const thumbPath = (id: string) => path.join(thumbsDir(), `${id}.jpg`);
 
+// An edited capture keeps the flattened result at its usual path (so copy, drag, pin and thumbnails
+// just work), the untouched capture in .originals and the editable annotations in .edits.
+function subDir(name: string): string {
+  const d = path.join(historyDir(), name);
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+
+const originalPath = (id: string) => path.join(subDir('.originals'), id);
+const editsPath = (id: string) => path.join(subDir('.edits'), `${id}.json`);
+
+/** The history id of a file inside the history folder, or null for any other file. */
+export function historyIdOf(file: string): string | null {
+  return path.resolve(path.dirname(file)) === path.resolve(historyDir()) ? path.basename(file) : null;
+}
+
+/** What the editor should open for `file`: the unedited image plus any saved annotations. */
+export function loadForEditing(file: string): { base: string; doc: unknown } {
+  const id = historyIdOf(file);
+  if (id && fs.existsSync(originalPath(id)) && fs.existsSync(editsPath(id))) {
+    try {
+      return { base: originalPath(id), doc: JSON.parse(fs.readFileSync(editsPath(id), 'utf8')) };
+    } catch (e) {
+      console.warn('Ignoring unreadable edits for', id, e);
+    }
+  }
+  return { base: file, doc: null };
+}
+
+/** Stores an edited capture: the flattened image, plus the original and annotations for re-editing. */
+export function saveEdits(id: string, png: Buffer, docJson: string) {
+  const it = getItem(id);
+  if (!it) return;
+  if (!fs.existsSync(originalPath(id))) fs.copyFileSync(it.path, originalPath(id));
+  fs.writeFileSync(editsPath(id), docJson);
+  updateItem(id, png);
+}
+
 export function timestampName(d = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `ShotKit ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} at ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`;
@@ -98,6 +136,8 @@ export function deleteItem(id: string) {
   if (!it) return;
   fs.rmSync(it.path, { force: true });
   fs.rmSync(thumbPath(id), { force: true });
+  fs.rmSync(originalPath(id), { force: true });
+  fs.rmSync(editsPath(id), { force: true });
 }
 
 export function clearHistory() {

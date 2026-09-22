@@ -1,8 +1,22 @@
 // Annotation editor. Shapes are stored in image pixel coordinates; the canvas shows the
 // (optionally cropped) image plus an optional "beautify" background with padding.
 import { IconName, svg } from '../shared/icons';
+import { findSensitive, PLURAL } from './redact';
 
-type ShapeType = 'arrow' | 'line' | 'rect' | 'ellipse' | 'blur' | 'pixelate' | 'pen' | 'highlighter' | 'text' | 'counter';
+type ShapeType =
+  | 'arrow'
+  | 'line'
+  | 'rect'
+  | 'ellipse'
+  | 'blur'
+  | 'pixelate'
+  | 'pen'
+  | 'highlighter'
+  | 'text'
+  | 'counter'
+  | 'callout'
+  | 'spotlight'
+  | 'redact';
 type Tool = 'select' | 'crop' | ShapeType;
 
 interface P {
@@ -19,11 +33,12 @@ interface Rect {
 
 /**
  * Geometry by type:
- * - line/arrow: start (x, y), vector (w, h)
- * - rect/ellipse/blur/pixelate: box (x, y, w, h)
+ * - line/arrow: start (x, y), vector (w, h), optional `bend`
+ * - rect/ellipse/blur/pixelate/spotlight/redact: box (x, y, w, h)
  * - pen: points
  * - highlighter: rects (one straight bar per highlighted text line)
  * - text: top-left (x, y), measured size (w, h), font size in `width`
+ * - callout: like text, plus the tail's `tip`
  * - counter: centre (x, y), radius in `width`
  */
 interface Shape extends Rect {
@@ -38,6 +53,12 @@ interface Shape extends Rect {
   dark?: boolean;
   text?: string;
   n?: number;
+  /** line/arrow: offset of the curve's control point from the midpoint of start and end. */
+  bend?: P;
+  /** arrow: an arrow style id; spotlight: 'rect' or 'ellipse'. */
+  style?: string;
+  /** callout: the point the tail points at. */
+  tip?: P;
 }
 
 interface Background {
@@ -52,6 +73,11 @@ interface Doc {
   shapes: Shape[];
   crop: Rect | null;
   bg: Background;
+}
+
+/** A word found by OCR, in image pixels. */
+interface Word extends Rect {
+  text?: string;
 }
 
 /** A recognised line of text; `words` are sorted left to right. */
@@ -80,10 +106,12 @@ const TOOLS: { id: Tool; icon: IconName; label: string; key: string }[] = [
   { id: 'rect', icon: 'rect', label: 'Rectangle', key: 'r' },
   { id: 'ellipse', icon: 'ellipse', label: 'Ellipse', key: 'o' },
   { id: 'text', icon: 'text', label: 'Text', key: 't' },
+  { id: 'callout', icon: 'callout', label: 'Callout', key: 'm' },
   { id: 'pen', icon: 'pen', label: 'Pen', key: 'p' },
   { id: 'highlighter', icon: 'highlighter', label: 'Highlighter', key: 'h' },
   { id: 'blur', icon: 'blur', label: 'Blur', key: 'b' },
   { id: 'pixelate', icon: 'pixelate', label: 'Pixelate', key: 'x' },
+  { id: 'spotlight', icon: 'spotlight', label: 'Spotlight', key: 's' },
   { id: 'counter', icon: 'counter', label: 'Numbered step', key: 'n' },
   { id: 'crop', icon: 'crop', label: 'Crop', key: 'c' },
 ];
@@ -93,7 +121,24 @@ const STROKE = [3, 6, 10];
 const TEXT_SIZE = [20, 32, 48];
 const COUNTER_R = [13, 18, 24];
 const HIGHLIGHT_BAR = [14, 22, 32];
+const CALLOUT_SIZE = [16, 22, 30];
 const HIGHLIGHTER_DEFAULT = '#ffcc00';
+const REDACT_COLOR = '#111114';
+
+/** Shape types with a style picker, and their styles (the first is the default). */
+const STYLES: Partial<Record<ShapeType, { id: string; icon: IconName; label: string }[]>> = {
+  arrow: [
+    { id: 'solid', icon: 'arrowSolid', label: 'Standard arrow' },
+    { id: 'tapered', icon: 'arrowTapered', label: 'Tapered arrow' },
+    { id: 'open', icon: 'arrowOpen', label: 'Open arrowhead' },
+    { id: 'double', icon: 'arrowDouble', label: 'Double-headed arrow' },
+    { id: 'dashed', icon: 'arrowDashed', label: 'Dashed arrow' },
+  ],
+  spotlight: [
+    { id: 'rect', icon: 'rect', label: 'Rectangular spotlight' },
+    { id: 'ellipse', icon: 'ellipse', label: 'Round spotlight' },
+  ],
+};
 
 const PRESETS: { id: string; stops?: string[]; solid?: string }[] = [
   { id: 'ocean', stops: ['#2e3192', '#1bffff'] },
@@ -147,6 +192,10 @@ let textDetection: 'pending' | 'done' | 'failed' = 'pending';
 // The highlighter keeps its own colour (yellow by default), separate from the other tools.
 let highlighterColor = HIGHLIGHTER_DEFAULT;
 let drawColor = COLORS[0];
+const styles: Partial<Record<ShapeType, string>> = { arrow: 'solid', spotlight: 'rect' };
+/** OCR lines as Windows returned them, before merging into rows (used by auto-redact). */
+let ocrLines: Word[][] = [];
+let textReady: Promise<void> = Promise.resolve();
 const effectCache: Partial<Record<'blur' | 'pixelate', HTMLCanvasElement>> = {};
 
 const undoStack: string[] = [];
@@ -185,10 +234,110 @@ function sizeFor(type: ShapeType, i: number): number {
   if (type === 'text') return TEXT_SIZE[i] * unit;
   if (type === 'counter') return COUNTER_R[i] * unit;
   if (type === 'highlighter') return HIGHLIGHT_BAR[i] * unit;
+  if (type === 'callout') return CALLOUT_SIZE[i] * unit;
   return STROKE[i] * unit;
 }
 
 const selected = () => doc.shapes.find((s) => s.id === selectedId) ?? null;
+
+/** The selection shows (and can be edited) in the select tool, and right after drawing a shape. */
+function visibleSelection(): Shape | null {
+  const s = selected();
+  return s && (tool === 'select' || s.type === tool) ? s : null;
+}
+
+const isBox = (t: ShapeType) =>
+  t === 'rect' || t === 'ellipse' || t === 'blur' || t === 'pixelate' || t === 'spotlight' || t === 'redact';
+
+// ---------------------------------------------------------------------------------------------
+// Curves
+// ---------------------------------------------------------------------------------------------
+
+/** Points along a line or arrow; a bent one is sampled along its quadratic curve. */
+function linePoints(s: Shape): P[] {
+  const a = { x: s.x, y: s.y };
+  const b = { x: s.x + s.w, y: s.y + s.h };
+  if (!s.bend) return [a, b];
+  const c = { x: s.x + s.w / 2 + s.bend.x, y: s.y + s.h / 2 + s.bend.y };
+  const pts: P[] = [];
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48;
+    const u = 1 - t;
+    pts.push({ x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y });
+  }
+  return pts;
+}
+
+/** Where the curve handle sits: the middle of the curve. */
+const bendHandle = (s: Shape): P => ({
+  x: s.x + s.w / 2 + (s.bend?.x ?? 0) / 2,
+  y: s.y + s.h / 2 + (s.bend?.y ?? 0) / 2,
+});
+
+function pathLength(pts: P[]): number {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  return len;
+}
+
+/** The part of a polyline between two distances along it. */
+function slicePath(pts: P[], from: number, to: number): P[] {
+  const out: P[] = [];
+  let acc = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const seg = Math.hypot(b.x - a.x, b.y - a.y);
+    const s0 = acc;
+    acc += seg;
+    if (!seg || acc < from || s0 > to) continue;
+    const at = (d: number) => ({ x: a.x + ((b.x - a.x) * (d - s0)) / seg, y: a.y + ((b.y - a.y) * (d - s0)) / seg });
+    if (!out.length) out.push(at(Math.max(from, s0)));
+    out.push(at(Math.min(to, acc)));
+  }
+  return out;
+}
+
+const pointAlong = (pts: P[], d: number): P => slicePath(pts, d, d)[0] ?? pts[0];
+
+function distToPath(p: P, pts: P[]): number {
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distToSeg(p, pts[i], pts[i + 1]));
+  return best;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Callouts
+// ---------------------------------------------------------------------------------------------
+
+/** The bubble around a callout's text. */
+function calloutBox(s: Shape): Rect {
+  const px = s.width * 0.6;
+  const py = s.width * 0.4;
+  return { x: s.x - px, y: s.y - py, w: s.w + px * 2, h: s.h + py * 2 };
+}
+
+/** The tail triangle, wound the same way as the bubble so that the two fill as one shape. */
+function calloutTail(s: Shape): P[] | null {
+  const b = calloutBox(s);
+  const t = s.tip;
+  if (!t || inRect(t, b)) return null;
+  const c = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  const len = Math.hypot(t.x - c.x, t.y - c.y);
+  const dx = (t.x - c.x) / len;
+  const dy = (t.y - c.y) / len;
+  // The tail starts where the line to the tip leaves the bubble (tucked in a little so the two
+  // join seamlessly), which keeps it wide at the bubble's edge.
+  const toEdge = Math.min(dx ? b.w / 2 / Math.abs(dx) : Infinity, dy ? b.h / 2 / Math.abs(dy) : Infinity);
+  const half = Math.min(b.h * 0.3, b.w * 0.2);
+  const back = Math.max(0, toEdge - half * 1.5);
+  const base = { x: c.x + dx * back, y: c.y + dy * back };
+  const p1 = { x: base.x - dy * half, y: base.y + dx * half };
+  const p2 = { x: base.x + dy * half, y: base.y - dx * half };
+  // roundRect() runs clockwise on screen, which is a positive signed area with y pointing down.
+  const area = (t.x - p1.x) * (p2.y - p1.y) - (p2.x - p1.x) * (t.y - p1.y);
+  return area > 0 ? [p1, t, p2] : [p2, t, p1];
+}
 
 // ---------------------------------------------------------------------------------------------
 // Text-aware highlighter
@@ -311,7 +460,8 @@ function updateHighlight(a: Extract<Action, { kind: 'highlight' }>, p: P) {
 
 async function detectText() {
   try {
-    const lines = await window.api.invoke<Rect[][]>('editor:words');
+    const lines = await window.api.invoke<Word[][]>('editor:words');
+    ocrLines = lines;
     // Windows OCR splits a visual row into several lines at wide gaps (e.g. a line number and
     // the code after it). Merge pieces on the same row that are reasonably close together.
     const rows: Rect[][] = [];
@@ -429,33 +579,88 @@ function strokePoints(c: CanvasRenderingContext2D, pts: P[]) {
   c.stroke();
 }
 
-function drawArrow(c: CanvasRenderingContext2D, s: Shape) {
-  const len = Math.hypot(s.w, s.h);
-  if (len < 1) return;
-  const x2 = s.x + s.w;
-  const y2 = s.y + s.h;
-  const ang = Math.atan2(s.h, s.w);
-  const cos = Math.cos(ang);
-  const sin = Math.sin(ang);
-  const head = Math.min(len * 0.7, Math.max(s.width * 3.4, 12 * unit));
-  const hw = head * 0.62;
-  const bx = x2 - cos * head;
-  const by = y2 - sin * head;
+function strokePath(c: CanvasRenderingContext2D, pts: P[]) {
+  if (pts.length < 2) return;
   c.beginPath();
-  c.moveTo(s.x, s.y);
-  c.lineTo(bx + cos * head * 0.3, by + sin * head * 0.3);
-  c.stroke();
-  c.beginPath();
-  c.moveTo(x2, y2);
-  c.lineTo(bx - sin * hw, by + cos * hw);
-  c.lineTo(bx + sin * hw, by - cos * hw);
-  c.closePath();
-  c.lineWidth = Math.max(1, s.width * 0.5);
-  c.fill();
+  c.moveTo(pts[0].x, pts[0].y);
+  for (const p of pts.slice(1)) c.lineTo(p.x, p.y);
   c.stroke();
 }
 
-function drawText(c: CanvasRenderingContext2D, s: Shape) {
+/** A shaft that widens from a thin tail to the arrowhead. */
+function fillTapered(c: CanvasRenderingContext2D, pts: P[], width: number) {
+  const total = pathLength(pts);
+  if (pts.length < 2 || !total) return;
+  const left: P[] = [];
+  const right: P[] = [];
+  let acc = 0;
+  pts.forEach((p, i) => {
+    if (i) acc += Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
+    const a = pts[Math.max(0, i - 1)];
+    const b = pts[Math.min(pts.length - 1, i + 1)];
+    const d = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const half = width * (0.12 + 0.63 * (acc / total));
+    const nx = (-(b.y - a.y) / d) * half;
+    const ny = ((b.x - a.x) / d) * half;
+    left.push({ x: p.x + nx, y: p.y + ny });
+    right.push({ x: p.x - nx, y: p.y - ny });
+  });
+  c.beginPath();
+  c.arc(pts[0].x, pts[0].y, width * 0.12, 0, Math.PI * 2);
+  c.fill();
+  c.beginPath();
+  for (const p of [...left, ...right.reverse()]) c.lineTo(p.x, p.y);
+  c.closePath();
+  c.fill();
+}
+
+/** An arrowhead at `tip`, pointing away from `from`. */
+function drawHead(c: CanvasRenderingContext2D, tip: P, from: P, head: number, open: boolean) {
+  const ang = Math.atan2(tip.y - from.y, tip.x - from.x);
+  const cos = Math.cos(ang);
+  const sin = Math.sin(ang);
+  const hw = head * (open ? 0.55 : 0.62);
+  const bx = tip.x - cos * head;
+  const by = tip.y - sin * head;
+  c.beginPath();
+  c.moveTo(bx - sin * hw, by + cos * hw);
+  c.lineTo(tip.x, tip.y);
+  c.lineTo(bx + sin * hw, by - cos * hw);
+  if (open) {
+    c.stroke();
+    return;
+  }
+  c.closePath();
+  const lw = c.lineWidth;
+  c.lineWidth = Math.max(1, lw * 0.5);
+  c.fill();
+  c.stroke();
+  c.lineWidth = lw;
+}
+
+function drawArrow(c: CanvasRenderingContext2D, s: Shape) {
+  const pts = linePoints(s);
+  const len = pathLength(pts);
+  if (len < 1) return;
+  const style = s.style ?? 'solid';
+  const double = style === 'double';
+  const open = style === 'open';
+  const head = Math.min(len * (double ? 0.4 : 0.7), Math.max(s.width * 3.4, 12 * unit));
+  // Filled heads cover the end of the shaft; an open head needs the shaft to reach the tip.
+  const inset = open ? 0 : head * 0.7;
+  const shaft = slicePath(pts, double ? inset : 0, len - inset);
+  if (style === 'tapered') fillTapered(c, shaft, s.width);
+  else {
+    if (style === 'dashed') c.setLineDash([s.width * 1.5, s.width * 2.5]);
+    strokePath(c, shaft);
+    c.setLineDash([]);
+  }
+  // Aim each head along the last stretch of the path so that it follows a curve.
+  drawHead(c, pts[pts.length - 1], pointAlong(pts, len - head), head, open);
+  if (double) drawHead(c, pts[0], pointAlong(pts, head), head, false);
+}
+
+function drawText(c: CanvasRenderingContext2D, s: Shape, outline = true) {
   const lh = s.width * 1.25;
   const off = (lh - s.width) / 2;
   c.font = font(s.width);
@@ -464,18 +669,63 @@ function drawText(c: CanvasRenderingContext2D, s: Shape) {
   c.strokeStyle = isLight(s.color) ? 'rgba(0,0,0,0.85)' : '#ffffff';
   (s.text ?? '').split('\n').forEach((line, i) => {
     const y = s.y + i * lh + off;
-    c.strokeText(line, s.x, y);
+    if (outline) c.strokeText(line, s.x, y);
     c.fillText(line, s.x, y);
   });
 }
 
-function measureText(s: Shape) {
+function drawCallout(c: CanvasRenderingContext2D, s: Shape) {
+  const b = calloutBox(s);
+  c.beginPath();
+  c.roundRect(b.x, b.y, b.w, b.h, Math.min(s.width * 0.5, b.h / 2));
+  const tail = calloutTail(s);
+  if (tail) {
+    c.moveTo(tail[0].x, tail[0].y);
+    c.lineTo(tail[1].x, tail[1].y);
+    c.lineTo(tail[2].x, tail[2].y);
+    c.closePath();
+  }
+  c.fill();
+  c.shadowColor = 'transparent';
+  c.fillStyle = isLight(s.color) ? '#1c1c1e' : '#ffffff';
+  drawText(c, s, false);
+}
+
+/** Sets a text or callout shape's size from its text. */
+function measureText(s: Shape, text = s.text ?? '') {
   ctx.save();
   ctx.font = font(s.width);
-  const lines = (s.text ?? '').split('\n');
-  s.w = Math.max(...lines.map((l) => ctx.measureText(l).width), 1);
+  const lines = text.split('\n');
+  const min = s.type === 'callout' ? s.width : 1;
+  s.w = Math.max(...lines.map((l) => ctx.measureText(l).width), min);
   s.h = lines.length * s.width * 1.25;
   ctx.restore();
+}
+
+let dimCanvas: HTMLCanvasElement | null = null;
+
+/** Dims the image outside every spotlight (together, so that overlapping ones don't stack). */
+function paintSpotlights(c: CanvasRenderingContext2D, spots: Shape[]) {
+  if (!spots.length) return;
+  const cv = (dimCanvas ??= document.createElement('canvas'));
+  if (cv.width !== imgW || cv.height !== imgH) {
+    cv.width = imgW;
+    cv.height = imgH;
+  }
+  const d = cv.getContext('2d')!;
+  d.globalCompositeOperation = 'copy';
+  d.fillStyle = 'rgba(0,0,0,0.6)';
+  d.fillRect(0, 0, imgW, imgH);
+  d.globalCompositeOperation = 'destination-out';
+  d.fillStyle = '#000';
+  for (const s of spots) {
+    const r = norm(s);
+    d.beginPath();
+    if (s.style === 'ellipse') d.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
+    else d.roundRect(r.x, r.y, r.w, r.h, Math.min(6 * unit, r.w / 2, r.h / 2));
+    d.fill();
+  }
+  c.drawImage(cv, 0, 0);
 }
 
 function drawShape(c: CanvasRenderingContext2D, s: Shape) {
@@ -493,10 +743,7 @@ function drawShape(c: CanvasRenderingContext2D, s: Shape) {
   switch (s.type) {
     case 'line':
       shadow();
-      c.beginPath();
-      c.moveTo(s.x, s.y);
-      c.lineTo(s.x + s.w, s.y + s.h);
-      c.stroke();
+      strokePath(c, linePoints(s));
       break;
     case 'arrow':
       shadow();
@@ -549,6 +796,20 @@ function drawShape(c: CanvasRenderingContext2D, s: Shape) {
     case 'text':
       drawText(c, s);
       break;
+    case 'callout':
+      shadow();
+      drawCallout(c, s);
+      break;
+    case 'redact': {
+      const r = norm(s);
+      c.beginPath();
+      c.roundRect(r.x, r.y, r.w, r.h, Math.min(2 * unit, r.w / 2, r.h / 2));
+      c.fill();
+      break;
+    }
+    case 'spotlight':
+      // Painted for all spotlights at once by paintSpotlights().
+      break;
     case 'counter':
       shadow();
       c.beginPath();
@@ -572,10 +833,12 @@ function bbox(s: Shape): Rect {
   switch (s.type) {
     case 'line':
     case 'arrow': {
-      const r = norm(s);
+      const r = union(linePoints(s).map((p) => ({ ...p, w: 0, h: 0 })));
       const m = s.width / 2;
       return { x: r.x - m, y: r.y - m, w: r.w + 2 * m, h: r.h + 2 * m };
     }
+    case 'callout':
+      return s.tip ? union([calloutBox(s), { ...s.tip, w: 0, h: 0 }]) : calloutBox(s);
     case 'highlighter':
       return s.rects?.length ? union(s.rects) : { x: s.x, y: s.y, w: 0, h: 0 };
     case 'pen': {
@@ -595,12 +858,10 @@ function bbox(s: Shape): Rect {
 
 function handles(s: Shape): P[] {
   if (s.type === 'line' || s.type === 'arrow') {
-    return [
-      { x: s.x, y: s.y },
-      { x: s.x + s.w, y: s.y + s.h },
-    ];
+    return [{ x: s.x, y: s.y }, { x: s.x + s.w, y: s.y + s.h }, bendHandle(s)];
   }
-  if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'blur' || s.type === 'pixelate') {
+  if (s.type === 'callout') return s.tip ? [s.tip] : [];
+  if (isBox(s.type)) {
     const r = norm(s);
     return [
       { x: r.x, y: r.y },
@@ -613,24 +874,29 @@ function handles(s: Shape): P[] {
 }
 
 function drawSelection(c: CanvasRenderingContext2D) {
-  if (tool !== 'select') return;
-  const s = selected();
-  if (!s) return;
+  const s = visibleSelection();
+  if (!s || editing?.shape.id === s.id) return;
   const k = 1 / viewScale();
   const b = bbox(s);
+  const line = s.type === 'line' || s.type === 'arrow';
   c.save();
   c.strokeStyle = '#4f8cff';
   c.lineWidth = 1.5 * k;
-  c.setLineDash([5 * k, 4 * k]);
-  c.strokeRect(b.x - 4 * k, b.y - 4 * k, b.w + 8 * k, b.h + 8 * k);
-  c.setLineDash([]);
-  for (const h of handles(s)) {
+  // Lines and arrows show only their handles; a box around a diagonal line is just noise.
+  if (!line || tool === 'select') {
+    c.setLineDash([5 * k, 4 * k]);
+    c.strokeRect(b.x - 4 * k, b.y - 4 * k, b.w + 8 * k, b.h + 8 * k);
+    c.setLineDash([]);
+  }
+  handles(s).forEach((h, i) => {
     c.fillStyle = '#fff';
     c.beginPath();
-    c.rect(h.x - 5 * k, h.y - 5 * k, 10 * k, 10 * k);
+    // The round handle bends a line or arrow into a curve.
+    if (line && i === 2) c.arc(h.x, h.y, 5.5 * k, 0, Math.PI * 2);
+    else c.rect(h.x - 5 * k, h.y - 5 * k, 10 * k, 10 * k);
     c.fill();
     c.stroke();
-  }
+  });
   c.restore();
 }
 
@@ -701,8 +967,16 @@ function paint(c: CanvasRenderingContext2D, exporting: boolean) {
   c.clip();
   c.translate(v.pad - v.base.x, v.pad - v.base.y);
   c.drawImage(img, 0, 0);
-  for (const s of doc.shapes) if (s.id !== editing?.shape.id) drawShape(c, s);
-  if (action?.kind === 'draw' || action?.kind === 'highlight') drawShape(c, action.shape);
+  const list = doc.shapes.filter((s) => s.id !== editing?.shape.id);
+  if (action?.kind === 'draw' || action?.kind === 'highlight') list.push(action.shape);
+  // A callout keeps its bubble while its text is being typed.
+  if (editing?.shape.type === 'callout') list.push({ ...editing.shape, text: '' });
+  const spots = list.filter((s) => s.type === 'spotlight');
+  // Blur and pixelate redraw image pixels, so they go under the spotlight's dimming.
+  const under = spots.length ? list.filter((s) => s.type === 'blur' || s.type === 'pixelate') : [];
+  for (const s of under) drawShape(c, s);
+  paintSpotlights(c, spots);
+  for (const s of list) if (!under.includes(s)) drawShape(c, s);
   c.restore();
   if (!exporting) {
     c.save();
@@ -726,30 +1000,44 @@ function render() {
 // Hit testing
 // ---------------------------------------------------------------------------------------------
 
+/** Hit test for a rectangle or ellipse: its whole area when filled, otherwise only its outline. */
+function hitBox(s: Shape, p: P, tol: number, ellipse: boolean, filled: boolean, stroke: number): boolean {
+  const r = norm(s);
+  if (!ellipse) {
+    const m = tol + stroke / 2;
+    if (!inRect(p, r, m)) return false;
+    if (filled) return true;
+    return !(p.x > r.x + m && p.x < r.x + r.w - m && p.y > r.y + m && p.y < r.y + r.h - m);
+  }
+  const rx = r.w / 2;
+  const ry = r.h / 2;
+  if (rx < 1 || ry < 1) return false;
+  const d = Math.hypot((p.x - r.x - rx) / rx, (p.y - r.y - ry) / ry);
+  const band = (tol + stroke / 2) / Math.min(rx, ry);
+  return filled ? d <= 1 + band : Math.abs(d - 1) <= band;
+}
+
 function hit(s: Shape, p: P, tol: number): boolean {
   switch (s.type) {
     case 'line':
     case 'arrow':
-      return distToSeg(p, { x: s.x, y: s.y }, { x: s.x + s.w, y: s.y + s.h }) <= s.width / 2 + tol;
-    case 'rect': {
-      const r = norm(s);
-      const m = tol + s.width / 2;
-      if (!inRect(p, r, m)) return false;
-      if (s.filled) return true;
-      return !(p.x > r.x + m && p.x < r.x + r.w - m && p.y > r.y + m && p.y < r.y + r.h - m);
-    }
-    case 'ellipse': {
-      const r = norm(s);
-      const rx = r.w / 2;
-      const ry = r.h / 2;
-      if (rx < 1 || ry < 1) return false;
-      const d = Math.hypot((p.x - r.x - rx) / rx, (p.y - r.y - ry) / ry);
-      const band = (tol + s.width / 2) / Math.min(rx, ry);
-      return s.filled ? d <= 1 + band : Math.abs(d - 1) <= band;
-    }
+      return distToPath(p, linePoints(s)) <= s.width / 2 + tol;
+    case 'rect':
+      return hitBox(s, p, tol, false, !!s.filled, s.width);
+    case 'ellipse':
+      return hitBox(s, p, tol, true, !!s.filled, s.width);
+    // A spotlight is picked by its edge, so that clicks inside it reach the shapes it lights up.
+    case 'spotlight':
+      return hitBox(s, p, tol, s.style === 'ellipse', false, 4 * unit);
     case 'blur':
     case 'pixelate':
+    case 'redact':
       return inRect(p, norm(s), tol);
+    case 'callout': {
+      if (inRect(p, calloutBox(s), tol)) return true;
+      const b = calloutBox(s);
+      return !!s.tip && distToSeg(p, { x: b.x + b.w / 2, y: b.y + b.h / 2 }, s.tip) <= tol + s.width * 0.3;
+    }
     case 'highlighter':
       return (s.rects ?? []).some((r) => inRect(p, r, tol));
     case 'pen': {
@@ -829,7 +1117,9 @@ function positionTextInput() {
   textInput.style.left = `${p.x - st.left - 1}px`;
   textInput.style.top = `${p.y - st.top - 1}px`;
   textInput.style.fontSize = `${s.width * k}px`;
-  textInput.style.color = s.color;
+  const callout = s.type === 'callout';
+  textInput.style.color = callout ? (isLight(s.color) ? '#1c1c1e' : '#ffffff') : s.color;
+  textInput.classList.toggle('callout', callout);
   autosizeText();
 }
 
@@ -844,6 +1134,11 @@ function autosizeText() {
   ctx.restore();
   textInput.style.width = `${w + s.width * k * 0.8 + 4}px`;
   textInput.style.height = `${lines.length * s.width * 1.25 * k + 2}px`;
+  if (s.type === 'callout') {
+    // Grow the bubble as the text is typed.
+    measureText(s, textInput.value);
+    render();
+  }
 }
 
 function openText(s: Shape, isNew: boolean) {
@@ -890,10 +1185,31 @@ textInput.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------------------------
 
 function newShape(type: ShapeType, p: P): Shape {
-  return { id: nextId++, type, color, width: sizeFor(type, sizeIdx), x: p.x, y: p.y, w: 0, h: 0 };
+  const s: Shape = { id: nextId++, type, color, width: sizeFor(type, sizeIdx), x: p.x, y: p.y, w: 0, h: 0 };
+  if (styles[type]) s.style = styles[type];
+  return s;
+}
+
+/** Places a callout's bubble (sized for its current text) centred on `p`. */
+function placeCallout(s: Shape, p: P) {
+  measureText(s);
+  s.x = p.x - s.w / 2;
+  s.y = p.y - s.h / 2;
 }
 
 function applyHandle(s: Shape, orig: Shape, idx: number, p: P) {
+  if (s.type === 'callout') {
+    s.tip = { ...p };
+    return;
+  }
+  if ((s.type === 'line' || s.type === 'arrow') && idx === 2) {
+    const mid = { x: orig.x + orig.w / 2, y: orig.y + orig.h / 2 };
+    const bend = { x: (p.x - mid.x) * 2, y: (p.y - mid.y) * 2 };
+    // Snap back to a straight line when the handle is dragged close to it.
+    const off = distToSeg(p, { x: orig.x, y: orig.y }, { x: orig.x + orig.w, y: orig.y + orig.h });
+    s.bend = off * viewScale() < 6 ? undefined : bend;
+    return;
+  }
   if (s.type === 'line' || s.type === 'arrow') {
     if (idx === 0) {
       s.x = p.x;
@@ -913,8 +1229,18 @@ function applyHandle(s: Shape, orig: Shape, idx: number, p: P) {
   s.h = p.y - opp.y;
 }
 
+/** Where the current pointer press started, in client pixels. */
+let downClient: P = { x: 0, y: 0 };
+
 function normalizeBox(s: Shape) {
-  if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'blur' || s.type === 'pixelate') Object.assign(s, norm(s));
+  if (isBox(s.type)) Object.assign(s, norm(s));
+}
+
+/** Index of the visible selection's handle under `p`, or -1. */
+function handleAt(p: P): number {
+  const sel = visibleSelection();
+  if (!sel) return -1;
+  return handles(sel).findIndex((h) => Math.hypot(h.x - p.x, h.y - p.y) <= 8 / viewScale());
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -924,6 +1250,7 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   canvas.setPointerCapture(e.pointerId);
+  downClient = { x: e.clientX, y: e.clientY };
   const p = toImg(e);
 
   if (tool === 'crop') {
@@ -933,15 +1260,14 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  // Handles of the selection work in the select tool and right after drawing a shape.
+  const hi = handleAt(p);
+  if (hi >= 0) {
+    action = { kind: 'handle', idx: hi, orig: clone(selected()!) };
+    return;
+  }
+
   if (tool === 'select') {
-    const sel = selected();
-    if (sel) {
-      const i = handles(sel).findIndex((h) => Math.hypot(h.x - p.x, h.y - p.y) <= 8 / viewScale());
-      if (i >= 0) {
-        action = { kind: 'handle', idx: i, orig: clone(sel) };
-        return;
-      }
-    }
     const s = shapeAt(p);
     selectedId = s?.id ?? null;
     if (s) {
@@ -953,10 +1279,17 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  if (tool === 'text') {
+  if (tool === 'text' || tool === 'callout') {
     const s = shapeAt(p);
-    if (s?.type === 'text') openText(s, false);
-    else openText({ ...newShape('text', p), text: '' }, true);
+    if (s?.type === tool) {
+      selectedId = null;
+      openText(s, false);
+      return;
+    }
+  }
+
+  if (tool === 'text') {
+    openText({ ...newShape('text', p), text: '' }, true);
     return;
   }
 
@@ -980,19 +1313,30 @@ canvas.addEventListener('pointerdown', (e) => {
   const shape = newShape(tool as ShapeType, p);
   if (tool === 'pen') shape.points = [p];
   if (tool === 'rect' || tool === 'ellipse') shape.filled = filled;
+  if (tool === 'callout') {
+    // Drag from the point of interest to where the bubble goes.
+    shape.text = '';
+    shape.tip = { ...p };
+    placeCallout(shape, p);
+  }
   selectedId = null;
   action = { kind: 'draw', shape, start: p };
+  render();
+});
+
+canvas.addEventListener('dblclick', (e) => {
+  if (!ready || tool !== 'select') return;
+  const s = shapeAt(toImg(e));
+  if (s?.type === 'text' || s?.type === 'callout') openText(s, false);
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (!ready) return;
   const p = toImg(e);
   if (!action) {
-    if (tool === 'select') {
-      const sel = selected();
-      const onHandle = sel && handles(sel).some((h) => Math.hypot(h.x - p.x, h.y - p.y) <= 8 / viewScale());
-      canvas.style.cursor = onHandle ? 'crosshair' : shapeAt(p) ? 'move' : 'default';
-    }
+    const onHandle = handleAt(p) >= 0;
+    if (tool === 'select') canvas.style.cursor = onHandle ? 'crosshair' : shapeAt(p) ? 'move' : 'default';
+    else if (tool !== 'crop' && tool !== 'text') canvas.style.cursor = onHandle ? 'grab' : cursorFor(tool);
     return;
   }
   const shift = e.shiftKey || shiftDown;
@@ -1000,7 +1344,8 @@ canvas.addEventListener('pointermove', (e) => {
   switch (action.kind) {
     case 'draw': {
       const s = action.shape;
-      if (s.type === 'pen') {
+      if (s.type === 'callout') placeCallout(s, p);
+      else if (s.type === 'pen') {
         const last = s.points![s.points!.length - 1];
         if (Math.hypot(p.x - last.x, p.y - last.y) * viewScale() >= 2) s.points!.push(p);
       } else {
@@ -1034,6 +1379,7 @@ canvas.addEventListener('pointermove', (e) => {
       s.x = action.orig.x + dx;
       s.y = action.orig.y + dy;
       if (action.orig.points) s.points = action.orig.points.map((q) => ({ x: q.x + dx, y: q.y + dy }));
+      if (action.orig.tip) s.tip = { x: action.orig.tip.x + dx, y: action.orig.tip.y + dy };
       if (action.orig.rects) s.rects = action.orig.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
       break;
     }
@@ -1055,7 +1401,7 @@ canvas.addEventListener('pointermove', (e) => {
   render();
 });
 
-canvas.addEventListener('pointerup', () => {
+canvas.addEventListener('pointerup', (e) => {
   if (!action) return;
   const a = action;
   action = null;
@@ -1063,11 +1409,23 @@ canvas.addEventListener('pointerup', () => {
   switch (a.kind) {
     case 'draw': {
       const s = a.shape;
+      if (s.type === 'callout') {
+        // A click (no drag) puts the bubble up and to the right of the point.
+        const tip = s.tip!;
+        if (Math.hypot(e.clientX - downClient.x, e.clientY - downClient.y) < 8) {
+          placeCallout(s, { x: tip.x + s.width * 5, y: tip.y - s.width * 3.5 });
+        }
+        openText(s, true);
+        return;
+      }
       const big = s.type === 'pen' ? true : Math.abs(s.w) >= minSize || Math.abs(s.h) >= minSize;
       if (big) {
         normalizeBox(s);
         doc.shapes.push(s);
+        // Keep the new shape selected so that its handles (e.g. an arrow's curve) are right there.
+        if (s.type === 'line' || s.type === 'arrow' || isBox(s.type)) selectedId = s.id;
         commit();
+        updateToolbar();
       }
       break;
     }
@@ -1152,12 +1510,35 @@ function applyCrop() {
 }
 
 function applyToSelected(fn: (s: Shape) => void) {
-  const s = tool === 'select' ? selected() : null;
+  const s = visibleSelection();
   if (!s) return;
   fn(s);
-  if (s.type === 'text') measureText(s);
+  if (s.type === 'text' || s.type === 'callout') measureText(s);
   commit();
   render();
+}
+
+/** The shape type whose styles the toolbar offers: the selection's, else the current tool's. */
+function styleTarget(): ShapeType | null {
+  const s = visibleSelection();
+  if (s) return STYLES[s.type] ? s.type : null;
+  return tool !== 'select' && tool !== 'crop' && STYLES[tool] ? tool : null;
+}
+
+function setStyle(type: ShapeType, id: string) {
+  styles[type] = id;
+  applyToSelected((s) => {
+    if (s.type === type) s.style = id;
+  });
+  updateToolbar();
+}
+
+function cycleStyle() {
+  const type = styleTarget();
+  if (!type) return;
+  const list = STYLES[type]!;
+  const cur = visibleSelection()?.style ?? styles[type];
+  setStyle(type, list[(list.findIndex((x) => x.id === cur) + 1) % list.length].id);
 }
 
 function setSize(i: number) {
@@ -1223,6 +1604,8 @@ function buildToolbar() {
 
   $('fill').innerHTML = svg('fill');
   $('fill').addEventListener('click', toggleFill);
+  $('redact').innerHTML = `${svg('redact')}<span>Redact</span>`;
+  $('redact').addEventListener('click', autoRedact);
   $('undo').innerHTML = svg('undo');
   $('undo').addEventListener('click', undo);
   $('redo').innerHTML = svg('redo');
@@ -1254,9 +1637,35 @@ function updateToolbar() {
     b.classList.toggle('active', b.dataset.size === String(sizeIdx));
   }
   $('fill').classList.toggle('active', filled);
+  updateStyles();
   ($('undo') as HTMLButtonElement).disabled = !undoStack.length;
   ($('redo') as HTMLButtonElement).disabled = !redoStack.length;
   $('bgToggle').classList.toggle('active', !bgPanel.hidden);
+}
+
+/** Shows the style picker for the current tool or selection (arrow and spotlight styles). */
+function updateStyles() {
+  const box = $('styles');
+  const type = styleTarget();
+  box.hidden = $('stylesSep').hidden = !type;
+  if (!type) return;
+  if (box.dataset.type !== type) {
+    box.dataset.type = type;
+    box.innerHTML = '';
+    for (const st of STYLES[type]!) {
+      const b = document.createElement('button');
+      b.className = 'tool';
+      b.dataset.style = st.id;
+      b.title = `${st.label} (press ${TOOLS.find((t) => t.id === type)!.key.toUpperCase()} again for the next style)`;
+      b.innerHTML = svg(st.icon);
+      b.addEventListener('click', () => setStyle(type, st.id));
+      box.appendChild(b);
+    }
+  }
+  const cur = visibleSelection()?.style ?? styles[type];
+  for (const b of Array.from(box.querySelectorAll<HTMLElement>('[data-style]'))) {
+    b.classList.toggle('active', b.dataset.style === cur);
+  }
 }
 
 function buildBgPanel() {
@@ -1330,6 +1739,44 @@ function toggleBgPanel() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Auto-redact
+// ---------------------------------------------------------------------------------------------
+
+let redacting = false;
+
+/** Blacks out sensitive text found by OCR, as one undoable step. */
+async function autoRedact() {
+  if (!ready || redacting) return;
+  redacting = true;
+  try {
+    if (textDetection === 'pending') toast('Reading text…');
+    await textReady;
+    if (textDetection === 'failed') {
+      toast('Text recognition is unavailable, so there is nothing to redact');
+      return;
+    }
+    const existing = doc.shapes.filter((s) => s.type === 'redact');
+    const covered = (r: Rect) => existing.some((s) => inRect({ x: r.x + r.w / 2, y: r.y + r.h / 2 }, norm(s)));
+    const fresh = findSensitive(ocrLines).filter((f) => !covered(f.box));
+    if (!fresh.length) {
+      toast(existing.length ? 'Nothing else to redact' : 'No emails, numbers or keys found');
+      return;
+    }
+    const counts = new Map<string, number>();
+    for (const f of fresh) {
+      doc.shapes.push({ id: nextId++, type: 'redact', color: REDACT_COLOR, width: 0, ...f.box });
+      counts.set(f.kind, (counts.get(f.kind) ?? 0) + 1);
+    }
+    commit();
+    render();
+    const parts = [...counts].map(([k, n]) => `${n} ${n === 1 ? k : PLURAL[k] ?? k}`);
+    toast(`Redacted ${parts.join(', ')}. Ctrl+Z to undo`);
+  } finally {
+    redacting = false;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------------------------
 
@@ -1357,6 +1804,7 @@ async function doExport(kind: string) {
     'editor:export',
     kind,
     new Uint8Array(await blob.arrayBuffer()),
+    snapshot(),
   );
   // Copying is the "done" action: the image is on the clipboard, so close the editor.
   if (kind === 'copy' && res?.ok) {
@@ -1396,16 +1844,20 @@ window.addEventListener('keydown', (e) => {
   if (k === 'f') return toggleFill();
   if (k === '1' || k === '2' || k === '3') return setSize(Number(k) - 1);
   const t = TOOLS.find((x) => x.key === k);
-  if (t && !e.altKey) setTool(t.id);
+  if (!t || e.altKey) return;
+  // Pressing an active tool's key again steps through its styles.
+  if (t.id === tool && styleTarget()) cycleStyle();
+  else setTool(t.id);
 });
 
 window.addEventListener('keyup', (e) => {
   if (e.key === 'Shift') shiftDown = false;
 });
 
-window.addEventListener('resize', () => {
+// The stage also changes size when the toolbar wraps onto another row (e.g. as style buttons appear).
+new ResizeObserver(() => {
   if (ready) layout();
-});
+}).observe(stage);
 
 // ---------------------------------------------------------------------------------------------
 // Startup
@@ -1414,7 +1866,9 @@ window.addEventListener('resize', () => {
 async function init() {
   buildToolbar();
   buildBgPanel();
-  const d = await window.api.invoke<{ name: string; dataUrl: string; scale: number }>('editor:load');
+  const d = await window.api.invoke<{ name: string; dataUrl: string; scale: number; doc: Doc | null }>(
+    'editor:load',
+  );
   document.title = `${d.name} — ShotKit Editor`;
   img = new Image();
   img.src = d.dataUrl;
@@ -1422,6 +1876,13 @@ async function init() {
   imgW = img.naturalWidth;
   imgH = img.naturalHeight;
   unit = Math.max(1, d.scale || 1);
+  if (d.doc) {
+    // Annotations saved the last time this capture was edited.
+    doc.shapes = d.doc.shapes ?? [];
+    doc.crop = d.doc.crop ?? null;
+    doc.bg = { ...doc.bg, ...d.doc.bg };
+    nextId = Math.max(0, ...doc.shapes.map((s) => s.id)) + 1;
+  }
   lastState = snapshot();
   ready = true;
   canvas.style.cursor = cursorFor(tool);
@@ -1429,7 +1890,7 @@ async function init() {
   updateToolbar();
   updateCropBar();
   paint(ctx, false);
-  detectText();
+  textReady = detectText();
 }
 
 init().catch((e) => toast(`Could not load image: ${e instanceof Error ? e.message : e}`));

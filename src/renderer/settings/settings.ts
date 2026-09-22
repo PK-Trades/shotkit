@@ -12,6 +12,7 @@ const HOTKEYS: [string, string][] = [
   ['fullscreen', 'Capture fullscreen'],
   ['scrolling', 'Scrolling capture'],
   ['ocr', 'Capture text (OCR)'],
+  ['timer', 'Self-timer capture'],
   ['history', 'Open capture history'],
 ];
 
@@ -136,6 +137,7 @@ function bindInputs() {
       const key = el.dataset.setting!;
       let value: unknown = el.value;
       if (el instanceof HTMLInputElement && el.type === 'checkbox') value = el.checked;
+      else if (el.dataset.number !== undefined) value = Number(el.value);
       else if (el instanceof HTMLInputElement && el.type === 'number') {
         const n = Number(el.value);
         value = Math.max(Number(el.min || 0), Math.min(Number(el.max || 1e9), Number.isFinite(n) ? Math.round(n) : 0));

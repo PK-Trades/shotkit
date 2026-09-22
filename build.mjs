@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const watch = process.argv.includes('--watch');
-const pages = ['overlay', 'quick', 'editor', 'pin', 'history', 'settings', 'scroll'];
+const pages = ['overlay', 'quick', 'editor', 'pin', 'history', 'settings', 'scroll', 'countdown'];
 
 fs.rmSync('dist', { recursive: true, force: true });
 

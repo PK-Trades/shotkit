@@ -26,6 +26,16 @@ const PATHS = {
   minus: '<path d="M5 12h14"/>',
   plus: '<path d="M5 12h14M12 5v14"/>',
   opacity: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor"/>',
+  callout: '<path d="M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-5 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/>',
+  spotlight:
+    '<rect x="2" y="3" width="20" height="18" rx="2" fill="currentColor" opacity=".3" stroke="none"/><circle cx="12" cy="12" r="5"/>',
+  redact: '<rect x="3" y="9" width="18" height="6" rx="1" fill="currentColor"/><path d="M3 5h7M14 5h7M3 19h4M11 19h10"/>',
+  arrowSolid: '<path d="M5 19 13 11"/><path d="M19 5 17 13 11 7Z" fill="currentColor"/>',
+  arrowTapered: '<path d="M4.5 19.5 12 11l1 1Z" fill="currentColor" stroke-width="1.5"/><path d="M19 5 17 13 11 7Z" fill="currentColor"/>',
+  arrowOpen: '<path d="M5 19 19 5"/><path d="M10 5h9v9"/>',
+  arrowDouble:
+    '<path d="M9 15 15 9"/><path d="M19 5 17.5 11.5 12.5 6.5Z" fill="currentColor"/><path d="M5 19 6.5 12.5 11.5 17.5Z" fill="currentColor"/>',
+  arrowDashed: '<path d="M5 19l2-2M10 14l2-2"/><path d="M19 5 17 13 11 7Z" fill="currentColor"/>',
 };
 
 export type IconName = keyof typeof PATHS;

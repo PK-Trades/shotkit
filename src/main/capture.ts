@@ -2,11 +2,19 @@ import { BrowserWindow, clipboard, Display, globalShortcut, NativeImage, Rectang
 import { getSettings } from './settings';
 import { addToHistory, exportToFolder } from './history';
 import { cropShot, grabDisplays, Shot } from './screenshot';
-import { helperWindowHandles, notifyHistoryChanged, openEditor, pagePath, showInQuickAccess, webPrefs } from './windows';
+import {
+  helperWindowHandles,
+  notifyHistoryChanged,
+  openCountdown,
+  openEditor,
+  pagePath,
+  showInQuickAccess,
+  webPrefs,
+} from './windows';
 import { listWindows, WinInfo } from './win32';
 import { ocrToClipboard } from './ocr';
 import { runScrolling } from './scrolling';
-import { errorMessage, notify } from './util';
+import { errorMessage, notify, sleep } from './util';
 
 export type CaptureMode = 'area' | 'window' | 'fullscreen' | 'scrolling' | 'ocr';
 
@@ -154,10 +162,50 @@ async function deliver(img: NativeImage) {
   else notify('Screenshot captured', s.copyToClipboard ? 'Copied to clipboard.' : 'Saved to capture history.');
 }
 
-export async function startCapture(mode: CaptureMode) {
+/**
+ * Shows a click-through countdown. Resolves true when it runs out, or false if cancelled with Esc.
+ */
+async function countdown(seconds: number): Promise<boolean> {
+  const { win, loaded } = openCountdown();
+  await loaded;
+  return new Promise((resolve) => {
+    let left = seconds;
+    let timer: NodeJS.Timeout | undefined;
+    let done = false;
+    const finish = async (ok: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      globalShortcut.unregister('Escape');
+      if (!win.isDestroyed()) win.destroy();
+      // Let the countdown disappear from the screen before it is grabbed.
+      if (ok) await sleep(200);
+      resolve(ok);
+    };
+    globalShortcut.register('Escape', () => finish(false));
+    const tick = () => {
+      if (win.isDestroyed()) return finish(false);
+      if (left <= 0) return finish(true);
+      win.webContents.send('countdown:tick', left, seconds);
+      left--;
+      timer = setTimeout(tick, 1000);
+    };
+    tick();
+  });
+}
+
+/** Self-timer: captures with the configured mode after the configured delay. */
+export function startTimedCapture(mode?: CaptureMode, delay?: number) {
+  const s = getSettings();
+  return startCapture(mode ?? s.timerMode, delay ?? (Number(s.timerDelay) || 5));
+}
+
+export async function startCapture(mode: CaptureMode, delay = 0) {
   if (busy) return;
   busy = true;
   try {
+    // Hover menus and tooltips stay open while the timer runs, then the screen is frozen as-is.
+    if (delay > 0 && !(await countdown(delay))) return;
     const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const shots = await grabDisplays(mode === 'fullscreen' ? [cursorDisplay.id] : undefined);
     if (!shots.length) throw new Error('Could not capture the screen.');

@@ -264,6 +264,45 @@ export function openSettings() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Self-timer countdown
+// ---------------------------------------------------------------------------------------------
+
+/** A small click-through countdown near the bottom of the screen the cursor is on. */
+export function openCountdown(): { win: BrowserWindow; loaded: Promise<void> } {
+  const S = 132;
+  const wa = cursorDisplay().workArea;
+  const win = new BrowserWindow({
+    x: Math.round(wa.x + (wa.width - S) / 2),
+    y: Math.round(wa.y + wa.height - S - 48),
+    width: S,
+    height: S,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    hasShadow: false,
+    thickFrame: false,
+    webPreferences: webPrefs(),
+  });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setIgnoreMouseEvents(true);
+  win.setContentProtection(true);
+  const loaded = new Promise<void>((r) =>
+    win.once('ready-to-show', () => {
+      win.showInactive();
+      r();
+    }),
+  );
+  win.loadFile(pagePath('countdown'));
+  return { win, loaded };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Scrolling-capture control bar
 // ---------------------------------------------------------------------------------------------
 

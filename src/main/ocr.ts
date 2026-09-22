@@ -23,11 +23,11 @@ const SCRIPT = [
   '$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()',
   "if ($null -eq $engine) { [Console]::Error.WriteLine('No OCR language is installed in Windows.'); exit 2 }",
   '$result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])',
-  // -Words: one "lineIndex<TAB>x<TAB>y<TAB>w<TAB>h" row per word (invariant culture decimals).
+  // -Words: one "lineIndex<TAB>x<TAB>y<TAB>w<TAB>h<TAB>text" row per word (invariant culture decimals).
   'if ($Words) {',
   '  $i = 0',
   '  foreach ($line in $result.Lines) {',
-  '    foreach ($w in $line.Words) { $r = $w.BoundingRect; [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}`t{1}`t{2}`t{3}`t{4}", $i, $r.X, $r.Y, $r.Width, $r.Height) }',
+  '    foreach ($w in $line.Words) { $r = $w.BoundingRect; [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}`t{1}`t{2}`t{3}`t{4}`t{5}", $i, $r.X, $r.Y, $r.Width, $r.Height, $w.Text) }',
   '    $i++',
   '  }',
   '} else { $result.Lines | ForEach-Object { $_.Text } }',
@@ -38,6 +38,7 @@ export interface WordBox {
   y: number;
   w: number;
   h: number;
+  text: string;
 }
 
 function workDir(): string {
@@ -91,14 +92,16 @@ export async function recognizeText(img: NativeImage): Promise<string> {
   return (await runOcr(img, false)).stdout;
 }
 
-/** Word boxes in image pixels, grouped by text line. */
+/** Words (boxes in image pixels, plus their text), grouped by text line. */
 export async function recognizeWords(img: NativeImage): Promise<WordBox[][]> {
   const { stdout, scale } = await runOcr(img, true);
   const lines: WordBox[][] = [];
   for (const row of stdout.split(/\r?\n/)) {
-    const [li, x, y, w, h] = row.split('\t').map(Number);
+    const cols = row.split('\t');
+    const [li, x, y, w, h] = cols.slice(0, 5).map(Number);
     if (![li, x, y, w, h].every(Number.isFinite)) continue;
-    (lines[li] ??= []).push({ x: x / scale, y: y / scale, w: w / scale, h: h / scale });
+    const text = cols.slice(5).join('\t');
+    (lines[li] ??= []).push({ x: x / scale, y: y / scale, w: w / scale, h: h / scale, text });
   }
   return lines.filter((l) => l?.length);
 }

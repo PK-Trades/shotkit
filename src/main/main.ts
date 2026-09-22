@@ -1,6 +1,6 @@
 import { app, globalShortcut, Menu, MenuItemConstructorOptions, nativeTheme, screen, Tray } from 'electron';
-import { getSettings, isFirstRun, onSettingsChanged } from './settings';
-import { CaptureMode, initCapture, startCapture } from './capture';
+import { getSettings, isFirstRun, onSettingsChanged, TimerMode, updateSettings } from './settings';
+import { CaptureMode, initCapture, startCapture, startTimedCapture } from './capture';
 import { registerHotkeys } from './hotkeys';
 import { registerIpc } from './ipc';
 import { makeIcon } from './icon';
@@ -17,8 +17,41 @@ const LABELS: Record<string, string> = {
   fullscreen: 'Capture Fullscreen',
   scrolling: 'Scrolling Capture',
   ocr: 'Capture Text (OCR)',
+  timer: 'Self-Timer',
   history: 'Capture History',
 };
+
+const TIMER_DELAYS = [3, 5, 10];
+
+function timerMenu(accel: Partial<MenuItemConstructorOptions>): MenuItemConstructorOptions {
+  const s = getSettings();
+  const delay = Number(s.timerDelay) || 5;
+  const mode = (m: TimerMode, label: string): MenuItemConstructorOptions => ({
+    label: `${label} in ${delay}s`,
+    ...(m === s.timerMode ? accel : {}),
+    click: () => {
+      updateSettings({ timerMode: m });
+      setTimeout(() => startTimedCapture(m), 250);
+    },
+  });
+  return {
+    label: LABELS.timer,
+    submenu: [
+      mode('area', 'Area'),
+      mode('window', 'Window'),
+      mode('fullscreen', 'Fullscreen'),
+      { type: 'separator' },
+      ...TIMER_DELAYS.map(
+        (d): MenuItemConstructorOptions => ({
+          label: `${d} seconds`,
+          type: 'radio',
+          checked: d === delay,
+          click: () => updateSettings({ timerDelay: d }),
+        }),
+      ),
+    ],
+  };
+}
 
 // Give the tray menu time to disappear so it isn't in the screenshot.
 const captureLater = (mode: CaptureMode) => () => setTimeout(() => startCapture(mode), 250);
@@ -39,6 +72,7 @@ function buildMenu(): Menu {
     { label: LABELS.fullscreen, ...acc(hk.fullscreen), click: captureLater('fullscreen') },
     { label: LABELS.scrolling, ...acc(hk.scrolling), click: captureLater('scrolling') },
     { label: LABELS.ocr, ...acc(hk.ocr), click: captureLater('ocr') },
+    timerMenu(acc(hk.timer)),
     { type: 'separator' },
     { label: 'Open Image in Editor…', click: () => openEditorFromDialog() },
     { label: 'Pin Image to Screen…', click: () => openPinFromDialog() },

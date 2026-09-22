@@ -1,6 +1,6 @@
 import { globalShortcut } from 'electron';
 import { getSettings, HotkeyAction } from './settings';
-import { startCapture } from './capture';
+import { startCapture, startTimedCapture } from './capture';
 import { openHistory } from './windows';
 
 const actions: Record<HotkeyAction, () => void> = {
@@ -9,6 +9,7 @@ const actions: Record<HotkeyAction, () => void> = {
   fullscreen: () => startCapture('fullscreen'),
   scrolling: () => startCapture('scrolling'),
   ocr: () => startCapture('ocr'),
+  timer: () => startTimedCapture(),
   history: () => openHistory(),
 };
 

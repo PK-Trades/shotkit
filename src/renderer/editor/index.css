@@ -132,6 +132,10 @@ body {
   font-family: 'Segoe UI', system-ui, sans-serif;
 }
 
+#textInput.callout {
+  background: transparent;
+}
+
 #cropBar {
   position: absolute;
   bottom: 18px;

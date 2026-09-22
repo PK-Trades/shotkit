@@ -6,7 +6,13 @@ A CleanShot X–style screenshot tool for Windows, built with Electron + TypeScr
 
 - **Capture area / window / fullscreen:** a frozen-screen overlay with a crosshair, a pixel magnifier and size labels. Press Space to switch between area and window picking, hold Shift for a square selection, and press Esc or right-click to cancel.
 - **Quick Access overlay:** after each capture a thumbnail appears in the corner. You can Copy, Save, Annotate, Pin or OCR it, or drag it straight into another app.
-- **Annotation editor:** arrow, line, rectangle, ellipse (outline or filled), text, pen, highlighter, blur, pixelate, numbered steps and crop, with undo/redo. It also has a "Background" beautifier (gradient backdrop, padding, rounded corners, shadow).
+- **Annotation editor:** arrow, line, rectangle, ellipse (outline or filled), text, callout, pen, highlighter, blur, pixelate, spotlight, numbered steps and crop, with undo/redo. It also has a "Background" beautifier (gradient backdrop, padding, rounded corners, shadow).
+  - **Arrows** come in five styles: standard, tapered, open, double-headed and dashed. Drag the round middle handle to curve an arrow or line.
+  - **Callouts** are speech bubbles: drag from the thing you're pointing at to where the bubble goes, then type.
+  - **Spotlight** dims everything outside a rectangle or ellipse.
+  - **Redact** finds emails, phone numbers, card numbers, IBANs, IP addresses and API keys with OCR and blacks them out in one step. Ctrl+Z undoes it.
+  - **Edits stay editable:** reopening a capture from history brings back its annotations, not a flattened image.
+- **Self-timer:** counts down (3, 5 or 10 seconds) before capturing, so you can open a menu or hover a tooltip first. Esc cancels. Choose the mode and delay in the tray menu or Settings.
 - **Scrolling capture:** select a region and ShotKit scrolls it and stitches the frames together. Click Done or press Esc.
 - **Capture text (OCR):** uses the OCR engine built into Windows and copies the text to the clipboard.
 - **Pin to screen:** a floating always-on-top image. Drag to move, scroll to zoom, Ctrl+scroll for opacity, Esc to close.
@@ -22,12 +28,15 @@ A CleanShot X–style screenshot tool for Windows, built with Electron + TypeScr
 | Capture area       | Ctrl + Shift + 4 |
 | Capture window     | Ctrl + Shift + 5 |
 | Scrolling capture  | Ctrl + Shift + 6 |
+| Self-timer capture | Ctrl + Shift + 7 |
 
 All of them can be changed in Settings (tray icon → Settings…). To use **Print Screen**, first turn off
 *Windows Settings → Accessibility → Keyboard → "Use the Print screen key to open screen capture"*.
 
-Editor shortcuts: V select, A arrow, L line, R rectangle, O ellipse, T text, P pen, H highlighter,
-B blur, X pixelate, N counter, C crop, F fill, 1/2/3 size, Ctrl+Z/Y undo/redo, Ctrl+C copy, Ctrl+S save.
+Editor shortcuts: V select, A arrow, L line, R rectangle, O ellipse, T text, M callout, P pen,
+H highlighter, B blur, X pixelate, S spotlight, N counter, C crop, F fill, 1/2/3 size, Ctrl+Z/Y undo/redo,
+Ctrl+C copy, Ctrl+S save. Press A (or S) again to switch to the next arrow (or spotlight) style.
+Double-click text or a callout with the select tool to edit it.
 
 ## Development
 
