@@ -97,6 +97,27 @@ function dragFile(id: string): string | null {
   return file;
 }
 
+/**
+ * The file name (without extension, possibly with template folders) for an editor's result.
+ * Also stores the annotations, so whatever the user does with the result, the capture in
+ * history stays editable.
+ */
+function editorExportBase(senderId: number, png: Buffer, docJson?: string): string {
+  const src = editorFile(senderId);
+  const historyId = src ? historyIdOf(src) : null;
+  const item = historyId ? getItem(historyId) : null;
+  if (historyId && docJson) {
+    try {
+      saveEdits(historyId, png, docJson);
+      notifyHistoryChanged();
+    } catch (err) {
+      console.warn('Could not store edits:', err);
+    }
+  }
+  // History captures save under their template name; other files next to "<name> (edited)".
+  return item ? savedNameFor(item) : src ? `${path.parse(src).name} (edited)` : timestampName();
+}
+
 export function registerIpc() {
   // Capture overlay -------------------------------------------------------------------------
   ipcMain.on('overlay:ready', (e) => overlayReady(e.sender));
@@ -163,23 +184,9 @@ export function registerIpc() {
       const png = Buffer.from(bytes);
       const img = nativeImage.createFromBuffer(png);
       const webp = extra?.webp ? Buffer.from(extra.webp) : null;
-      const src = editorFile(e.sender.id);
       const win = BrowserWindow.fromWebContents(e.sender);
       const s = getSettings();
-      const historyId = src ? historyIdOf(src) : null;
-      const item = historyId ? getItem(historyId) : null;
-      // History captures save under their template name; other files next to "<name> (edited)".
-      const base = item ? savedNameFor(item) : src ? `${path.parse(src).name} (edited)` : timestampName();
-
-      // Whatever the user does with the result, the capture in history keeps its annotations editable.
-      if (historyId && docJson) {
-        try {
-          saveEdits(historyId, png, docJson);
-          notifyHistoryChanged();
-        } catch (err) {
-          console.warn('Could not store edits:', err);
-        }
-      }
+      const base = editorExportBase(e.sender.id, png, docJson);
 
       const bytesFor = async (format: 'png' | 'jpg' | 'webp') =>
         format === 'webp' && webp ? webp : format === 'png' ? png : encode(img, format);
@@ -224,6 +231,21 @@ export function registerIpc() {
       return { ok: false };
     },
   );
+
+  // "Drag me": the edited image, written to a temp file in the drag format, dragged out as a file.
+  ipcMain.on('editor:drag', (e, bytes: Uint8Array, docJson?: string) => {
+    const png = Buffer.from(bytes);
+    const img = nativeImage.createFromBuffer(png);
+    if (img.isEmpty()) return;
+    const jpg = getSettings().dragFormat === 'jpg';
+    const dir = path.join(app.getPath('temp'), 'shotkit', 'drag');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${path.basename(editorExportBase(e.sender.id, png, docJson))}.${jpg ? 'jpg' : 'png'}`);
+    fs.writeFileSync(file, jpg ? img.toJPEG(getSettings().jpgQuality || 92) : png);
+    const { width, height } = img.getSize();
+    const icon = width >= height ? img.resize({ width: Math.min(width, 128) }) : img.resize({ height: Math.min(height, 128) });
+    e.sender.startDrag({ file, icon });
+  });
 
   // Pinned screenshots ----------------------------------------------------------------------
   const pinWin = (e: Electron.IpcMainEvent) => BrowserWindow.fromWebContents(e.sender);

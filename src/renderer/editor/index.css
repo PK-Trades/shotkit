@@ -146,6 +146,43 @@ body {
   color: var(--text);
 }
 
+#dragOut {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: rgba(34, 34, 38, 0.92);
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: grab;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+#dragOut:hover {
+  color: var(--text);
+}
+
+#dragOut:active {
+  cursor: grabbing;
+}
+
+#dragOut[hidden] {
+  display: none;
+}
+
+#dragOut svg {
+  width: 14px;
+  height: 14px;
+  opacity: 0.6;
+}
+
 #menu {
   position: absolute;
   z-index: 10;

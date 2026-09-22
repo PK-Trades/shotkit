@@ -52,6 +52,7 @@ const PATHS = {
   upload: '<path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/>',
   record: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  grip: '<path d="M5 8h14M5 12h14M5 16h14"/>',
 };
 
 export type IconName = keyof typeof PATHS;

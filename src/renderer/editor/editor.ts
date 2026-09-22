@@ -1048,6 +1048,7 @@ function setTool(t: Tool) {
 
 function updateCropBar() {
   cropBar.hidden = tool !== 'crop';
+  $('dragOut').hidden = tool === 'crop';
   $('cropSize').textContent = pendingCrop
     ? `${Math.round(pendingCrop.w)} × ${Math.round(pendingCrop.h)}`
     : 'Drag to select';
@@ -1258,6 +1259,9 @@ function buildToolbar() {
     render();
   });
   zoomLabel.addEventListener('click', () => setZoom(zoom === null ? 1 : null));
+  const dragOut = $('dragOut');
+  dragOut.innerHTML = `${svg('grip')}<span>Drag me</span>${svg('grip')}`;
+  dragOut.addEventListener('dragstart', dragImageOut);
   buildMenu();
 }
 
@@ -1568,6 +1572,21 @@ async function doExport(kind: string) {
     return;
   }
   if (res?.message) toast(res.message);
+}
+
+/**
+ * Drags the finished image out as a file. The OS drag has to start while the mouse is still
+ * down, so the image is encoded synchronously here and main writes it out before starting it.
+ */
+function dragImageOut(e: DragEvent) {
+  e.preventDefault();
+  if (!ready) return;
+  if (editing) commitText();
+  const url = renderFinal().toDataURL('image/png');
+  const b64 = atob(url.slice(url.indexOf(',') + 1));
+  const png = new Uint8Array(b64.length);
+  for (let i = 0; i < b64.length; i++) png[i] = b64.charCodeAt(i);
+  window.api.send('editor:drag', png, snapshot());
 }
 
 // ---------------------------------------------------------------------------------------------
