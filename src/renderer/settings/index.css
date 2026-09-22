@@ -82,3 +82,43 @@ h2 {
   font-size: 12px;
   margin: 0;
 }
+
+.row .wide {
+  flex: 1.4;
+  min-width: 0;
+}
+
+.row.top {
+  align-items: flex-start;
+}
+
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.note.sub {
+  margin: -6px 0 0 26px;
+}
+
+code {
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+[data-service] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#namePreview {
+  color: var(--text);
+  word-break: break-all;
+}

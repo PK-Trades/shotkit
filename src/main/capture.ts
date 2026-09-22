@@ -1,6 +1,7 @@
 import { BrowserWindow, clipboard, Display, globalShortcut, NativeImage, Rectangle, screen, WebContents } from 'electron';
 import { getSettings } from './settings';
-import { addToHistory, exportToFolder } from './history';
+import { addToHistory, CaptureInfo, exportToFolder, outputImage } from './history';
+import { drawCursor, styleWindow } from './imagejobs';
 import { cropShot, grabDisplays, Shot } from './screenshot';
 import {
   helperWindowHandles,
@@ -11,12 +12,24 @@ import {
   showInQuickAccess,
   webPrefs,
 } from './windows';
-import { listWindows, WinInfo } from './win32';
+import { foregroundWindow, listWindows, WinInfo } from './win32';
 import { ocrToClipboard } from './ocr';
 import { runScrolling } from './scrolling';
+import { isRecording, startRecording, stopRecording } from './recording';
 import { errorMessage, notify, sleep } from './util';
 
-export type CaptureMode = 'area' | 'window' | 'fullscreen' | 'scrolling' | 'ocr';
+export type CaptureMode =
+  | 'area'
+  | 'window'
+  | 'fullscreen'
+  | 'scrolling'
+  | 'ocr'
+  | 'previous'
+  | 'record'
+  | 'color'
+  | 'measure';
+
+type OverlayMode = Exclude<CaptureMode, 'fullscreen' | 'previous'>;
 
 interface Overlay {
   win: BrowserWindow;
@@ -28,17 +41,30 @@ export interface Selection {
   displayId: number;
   /** DIPs relative to the display's top-left corner. */
   rect: Rectangle;
+  /** Picked as a window (rather than dragged), and that window's title. */
+  window?: boolean;
+  title?: string;
+  /** Colour picker result. */
+  color?: string;
 }
 
 const overlays = new Map<number, Overlay>();
 let pending: { resolve: (s: Selection | null) => void } | null = null;
 let busy = false;
+/** The last area or window captured, for "Capture Previous Area". */
+let lastArea: { displayId: number; rect: Rectangle } | null = null;
 
 export function initCapture() {
+  let rebuild: NodeJS.Timeout | undefined;
   const reset = () => {
     if (pending) return;
     for (const o of overlays.values()) if (!o.win.isDestroyed()) o.win.destroy();
     overlays.clear();
+    // Re-create them once things settle, so the next capture is still instant.
+    clearTimeout(rebuild);
+    rebuild = setTimeout(() => {
+      if (!pending) for (const d of screen.getAllDisplays()) ensureOverlay(d);
+    }, 1500);
   };
   screen.on('display-added', reset);
   screen.on('display-removed', reset);
@@ -54,7 +80,9 @@ function ensureOverlay(d: Display): Overlay {
     ...d.bounds,
     show: false,
     frame: false,
-    backgroundColor: '#000000',
+    // Transparent so a live (unfrozen) selection can show the real screen underneath.
+    transparent: true,
+    backgroundColor: '#00000000',
     resizable: false,
     movable: false,
     minimizable: false,
@@ -78,7 +106,11 @@ function ensureOverlay(d: Display): Overlay {
   return o;
 }
 
-async function select(mode: CaptureMode, shots: Shot[]): Promise<Selection | null> {
+/**
+ * Shows the selection overlay on every display. With `shots` the screen is frozen (the overlay
+ * shows the screenshot); without, the overlay is see-through and the screen stays live.
+ */
+async function select(mode: OverlayMode, shots: Shot[] | null): Promise<Selection | null> {
   let windows: WinInfo[] = [];
   try {
     windows = listWindows(helperWindowHandles());
@@ -89,15 +121,20 @@ async function select(mode: CaptureMode, shots: Shot[]): Promise<Selection | nul
   const result = new Promise<Selection | null>((resolve) => (pending = { resolve }));
   // Fallback in case the overlay can't take keyboard focus from the foreground app.
   globalShortcut.register('Escape', () => finishSelection(null));
-  const magnifier = getSettings().showMagnifier;
+  const magnifier = getSettings().showMagnifier || mode === 'color';
+  const displays = shots ? shots.map((s) => s.display) : screen.getAllDisplays();
 
-  for (const shot of shots) {
-    const o = ensureOverlay(shot.display);
+  for (const display of displays) {
+    const o = ensureOverlay(display);
     await o.loaded;
     if (!pending) break;
-    const b = shot.display.bounds;
+    const b = display.bounds;
     o.win.setBounds(b);
-    const { width, height } = shot.image.getSize();
+    const image = shots?.find((s) => s.display.id === display.id)?.image;
+    const size = image?.getSize() ?? {
+      width: Math.round(b.width * display.scaleFactor),
+      height: Math.round(b.height * display.scaleFactor),
+    };
     const wins = windows
       .map((w) => {
         const r = screen.screenToDipRect(null, { x: w.x, y: w.y, width: w.width, height: w.height });
@@ -105,14 +142,14 @@ async function select(mode: CaptureMode, shots: Shot[]): Promise<Selection | nul
       })
       .filter((r) => r.x < b.width && r.y < b.height && r.x + r.width > 0 && r.y + r.height > 0);
     o.win.webContents.send('overlay:init', {
-      displayId: shot.display.id,
+      displayId: display.id,
       mode,
-      width,
-      height,
-      pixels: shot.image.toBitmap(),
+      width: size.width,
+      height: size.height,
+      pixels: image ? image.toBitmap() : null,
       windows: wins,
       cursor: { x: cursor.x - b.x, y: cursor.y - b.y },
-      magnifier,
+      magnifier: magnifier && !!image,
     });
   }
   return result;
@@ -145,13 +182,13 @@ export function finishSelection(sel: Selection | null) {
   p.resolve(sel);
 }
 
-async function deliver(img: NativeImage) {
+async function deliver(img: NativeImage, info: CaptureInfo) {
   const s = getSettings();
-  const item = addToHistory(img);
-  if (s.copyToClipboard) clipboard.writeImage(img);
+  const item = addToHistory(img, info);
+  if (s.copyToClipboard) clipboard.writeImage(outputImage(img, info.scale));
   if (s.autoSave) {
     try {
-      exportToFolder(item);
+      await exportToFolder(item);
     } catch (e) {
       notify('Could not save screenshot', errorMessage(e));
     }
@@ -200,34 +237,127 @@ export function startTimedCapture(mode?: CaptureMode, delay?: number) {
   return startCapture(mode ?? s.timerMode, delay ?? (Number(s.timerDelay) || 5));
 }
 
+/** Draws the pointer into `img` (a crop of `display` at DIP `rect`) if it's inside. */
+async function withCursor(img: NativeImage, display: Display, rect: Rectangle, cursor: Electron.Point) {
+  if (!getSettings().captureCursor) return img;
+  const x = cursor.x - display.bounds.x - rect.x;
+  const y = cursor.y - display.bounds.y - rect.y;
+  if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return img;
+  const k = img.getSize().width / rect.width;
+  try {
+    return await drawCursor(img, x * k, y * k, display.scaleFactor);
+  } catch (e) {
+    console.warn('Could not draw the pointer:', e);
+    return img;
+  }
+}
+
+function foreground(): { app?: string; title?: string } {
+  try {
+    const f = foregroundWindow();
+    return f ? { app: f.app || undefined, title: f.title || undefined } : {};
+  } catch {
+    return {};
+  }
+}
+
 export async function startCapture(mode: CaptureMode, delay = 0) {
+  // The record shortcut stops a recording in progress.
+  if (mode === 'record' && isRecording()) {
+    stopRecording();
+    return;
+  }
   if (busy) return;
   busy = true;
   try {
     // Hover menus and tooltips stay open while the timer runs, then the screen is frozen as-is.
     if (delay > 0 && !(await countdown(delay))) return;
-    const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    const shots = await grabDisplays(mode === 'fullscreen' ? [cursorDisplay.id] : undefined);
-    if (!shots.length) throw new Error('Could not capture the screen.');
+    const s = getSettings();
+    // Before any overlay takes focus: what app is the user capturing?
+    const front = foreground();
+    const cursor = screen.getCursorScreenPoint();
+    const cursorDisplay = screen.getDisplayNearestPoint(cursor);
+    const info = (display: Display, m: string, title = front.title): CaptureInfo => ({
+      ...front,
+      title,
+      mode: m,
+      scale: display.scaleFactor,
+    });
 
-    if (mode === 'fullscreen') {
-      await deliver(shots[0].image);
+    if (mode === 'previous') {
+      const last = lastArea;
+      const display = last && screen.getAllDisplays().find((d) => d.id === last.displayId);
+      if (!last || !display) {
+        notify('No previous area yet', 'Capture an area first; this repeats it.');
+        return;
+      }
+      const [shot] = await grabDisplays([display.id]);
+      if (!shot) throw new Error('Could not capture the screen.');
+      const img = await withCursor(cropShot(shot, last.rect), display, last.rect, cursor);
+      await deliver(img, info(display, 'area'));
       return;
     }
+
+    if (mode === 'fullscreen') {
+      const [shot] = await grabDisplays([cursorDisplay.id]);
+      if (!shot) throw new Error('Could not capture the screen.');
+      const full = { x: 0, y: 0, width: shot.display.bounds.width, height: shot.display.bounds.height };
+      await deliver(await withCursor(shot.image, shot.display, full, cursor), info(shot.display, 'fullscreen'));
+      return;
+    }
+
+    // Recording always selects on the live screen; the colour picker and ruler need pixels.
+    const live = mode === 'record' || (!s.freezeScreen && mode !== 'color' && mode !== 'measure');
+    const shots = live ? null : await grabDisplays();
+    if (shots && !shots.length) throw new Error('Could not capture the screen.');
 
     const sel = await select(mode, shots);
     if (!sel) return;
-    const shot = shots.find((s) => s.display.id === sel.displayId);
-    if (!shot) return;
 
-    if (mode === 'scrolling') {
-      const img = await runScrolling(shot.display, sel.rect);
-      if (img) await deliver(img);
+    if (mode === 'color') {
+      if (sel.color) {
+        clipboard.writeText(sel.color);
+        notify('Colour copied', sel.color);
+      }
       return;
     }
-    const img = cropShot(shot, sel.rect);
-    if (mode === 'ocr') await ocrToClipboard(img);
-    else await deliver(img);
+    const display = screen.getAllDisplays().find((d) => d.id === sel.displayId);
+    if (!display) return;
+
+    if (mode === 'record') {
+      await startRecording(display, sel.rect);
+      return;
+    }
+
+    let shot = shots?.find((x) => x.display.id === sel.displayId);
+    if (!shot) {
+      // Live selection: grab now that the overlay is gone.
+      await sleep(150);
+      [shot] = await grabDisplays([sel.displayId]);
+      if (!shot) throw new Error('Could not capture the screen.');
+    }
+
+    if (mode === 'scrolling') {
+      const img = await runScrolling(display, sel.rect);
+      if (img) await deliver(img, info(display, 'scrolling'));
+      return;
+    }
+
+    let img = cropShot(shot, sel.rect);
+    if (mode === 'ocr') {
+      await ocrToClipboard(img);
+      return;
+    }
+    lastArea = { displayId: sel.displayId, rect: sel.rect };
+    img = await withCursor(img, display, sel.rect, cursor);
+    if (sel.window && s.windowStyle !== 'plain') {
+      try {
+        img = await styleWindow(img, s.windowStyle === 'shadow', display.scaleFactor);
+      } catch (e) {
+        console.warn('Could not style the window capture:', e);
+      }
+    }
+    await deliver(img, sel.window ? info(display, 'window', sel.title) : info(display, 'area'));
   } catch (e) {
     finishSelection(null);
     notify('Capture failed', errorMessage(e));

@@ -36,6 +36,22 @@ const PATHS = {
   arrowDouble:
     '<path d="M9 15 15 9"/><path d="M19 5 17.5 11.5 12.5 6.5Z" fill="currentColor"/><path d="M5 19 6.5 12.5 11.5 17.5Z" fill="currentColor"/>',
   arrowDashed: '<path d="M5 19l2-2M10 14l2-2"/><path d="M19 5 17 13 11 7Z" fill="currentColor"/>',
+  arrowElbow: '<path d="M4 18h7V8h5"/><path d="M20 8 15 4.5v7Z" fill="currentColor"/>',
+  lineDashed: '<path d="M5 19l2.5-2.5M10.5 13.5l3-3M16.5 7.5 19 5"/>',
+  lineDots: '<path d="M7 17 17 7"/><circle cx="5.5" cy="18.5" r="2.2" fill="currentColor"/><circle cx="18.5" cy="5.5" r="2.2" fill="currentColor"/>',
+  lineMeasure: '<path d="M4 12h16M4 8v8M20 8v8"/>',
+  textOutline: '<path d="M4 7V4h16v3M9 20h6M12 4v16" stroke-width="3.5" opacity=".35"/><path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
+  textPill: '<rect x="2" y="5" width="20" height="14" rx="4" fill="currentColor" opacity=".3" stroke="none"/><path d="M8 9h8M12 9v7"/>',
+  alignLeft: '<path d="M4 6h16M4 12h10M4 18h13"/>',
+  alignCenter: '<path d="M4 6h16M7 12h10M5.5 18h13"/>',
+  alignRight: '<path d="M4 6h16M10 12h10M7 18h13"/>',
+  magnifier: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5M10.5 8v5"/>',
+  stamp: '<path d="M9 3h6l-1 7h4a2 2 0 0 1 2 2v3H4v-3a2 2 0 0 1 2-2h4Z"/><path d="M5 20h14"/>',
+  eyedropper: '<path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3Z"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  upload: '<path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/>',
+  record: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
 };
 
 export type IconName = keyof typeof PATHS;

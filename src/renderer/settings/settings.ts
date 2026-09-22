@@ -1,4 +1,4 @@
-export {};
+import { renderName } from '../../main/naming';
 
 type Settings = Record<string, any> & { hotkeys: Record<string, string>; saveFolder: string };
 interface State {
@@ -13,6 +13,10 @@ const HOTKEYS: [string, string][] = [
   ['scrolling', 'Scrolling capture'],
   ['ocr', 'Capture text (OCR)'],
   ['timer', 'Self-timer capture'],
+  ['previous', 'Capture previous area'],
+  ['record', 'Record screen (again to stop)'],
+  ['colorPicker', 'Pick colour from screen'],
+  ['measure', 'Measure on screen'],
   ['history', 'Open capture history'],
 ];
 
@@ -70,6 +74,10 @@ function render() {
     else if (document.activeElement !== el) el.value = String(v);
   }
   (document.getElementById('saveFolder') as HTMLInputElement).value = s.saveFolder;
+  updatePreview();
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-service]'))) {
+    el.hidden = el.dataset.service !== s.uploadService;
+  }
   for (const input of Array.from(hotkeysEl.querySelectorAll<HTMLInputElement>('.hotkey'))) {
     const action = input.dataset.action!;
     if (!input.classList.contains('recording')) input.value = pretty(s.hotkeys[action]);
@@ -131,7 +139,24 @@ function buildHotkeys() {
   }
 }
 
+/** Shows what a capture made now would be called, using the template as typed. */
+function updatePreview() {
+  const s = state.settings;
+  const tpl = document.querySelector<HTMLInputElement>('[data-setting="fileNameTemplate"]')!.value;
+  const name = renderName(tpl, {
+    date: new Date(),
+    app: 'Chrome',
+    title: 'Example page',
+    mode: 'area',
+    width: 1280,
+    height: 720,
+    n: s.fileCounter,
+  });
+  document.getElementById('namePreview')!.textContent = `${name.replace(/\//g, '\\')}.${s.format}`;
+}
+
 function bindInputs() {
+  document.querySelector('[data-setting="fileNameTemplate"]')!.addEventListener('input', updatePreview);
   for (const el of Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-setting]'))) {
     el.addEventListener('change', () => {
       const key = el.dataset.setting!;

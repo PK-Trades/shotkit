@@ -7,15 +7,20 @@ interface Item {
   height: number;
   timeout: number;
   side: 'left' | 'right';
+  canUpload: boolean;
 }
 
-const MAX_CARDS = 4;
+const MAX_CARDS = 6;
 const stack = document.getElementById('stack') as HTMLDivElement;
+const closeAll = document.getElementById('closeAll') as HTMLButtonElement;
 
-const FLASH: Record<string, string> = { copy: 'Copied', save: 'Saved', ocr: 'Text copied' };
+const FLASH: Record<string, string> = { copy: 'Copied', save: 'Saved', ocr: 'Text copied', upload: 'Uploading…' };
+
+const cards = () => Array.from(stack.querySelectorAll<HTMLElement>('.card:not(.leaving)'));
 
 function reportSize() {
-  requestAnimationFrame(() => window.api.send('qa:resize', stack.children.length ? stack.offsetHeight : 0));
+  closeAll.hidden = cards().length < 2;
+  requestAnimationFrame(() => window.api.send('qa:resize', cards().length ? stack.offsetHeight : 0));
 }
 
 function removeCard(card: HTMLElement) {
@@ -40,6 +45,10 @@ function addCard(it: Item) {
       <button class="corner tr" data-a="edit" title="Annotate">${svg('edit')}</button>
       <button class="corner bl" data-a="pin" title="Pin to screen">${svg('pin')}</button>
       <button class="corner br" data-a="ocr" title="Copy text (OCR)">${svg('text')}</button>
+      <div class="topmid">
+        <button class="corner" data-a="folder" title="Show in folder">${svg('folder')}</button>
+        ${it.canUpload ? `<button class="corner" data-a="upload" title="Upload and copy the link">${svg('upload')}</button>` : ''}
+      </div>
       <div class="center">
         <button class="pill" data-a="copy">Copy</button>
         <button class="pill" data-a="save">Save</button>
@@ -67,7 +76,13 @@ function addCard(it: Item) {
         flash.textContent = action === 'ocr' ? 'Reading text…' : FLASH[action];
         card.appendChild(flash);
       }
-      await window.api.invoke('qa:action', it.id, action);
+      const res = await window.api.invoke<{ ok: boolean }>('qa:action', it.id, action);
+      // Showing the folder leaves the card in place.
+      if (action === 'folder') return arm();
+      if (action === 'upload' && !res?.ok) {
+        card.querySelector('.flash')?.remove();
+        return arm();
+      }
       if (action === 'ocr') await new Promise((r) => setTimeout(r, 300));
       else if (FLASH[action]) await new Promise((r) => setTimeout(r, 450));
     }
@@ -86,7 +101,8 @@ function addCard(it: Item) {
   });
 
   stack.appendChild(card);
-  while (stack.children.length > MAX_CARDS) stack.firstElementChild!.remove();
+  const all = cards();
+  for (const old of all.slice(0, Math.max(0, all.length - MAX_CARDS))) old.remove();
 
   const img = card.querySelector('img')!;
   const show = () => {
@@ -97,8 +113,12 @@ function addCard(it: Item) {
   else img.addEventListener('load', show, { once: true });
 }
 
+closeAll.addEventListener('click', () => {
+  for (const c of cards()) removeCard(c);
+});
+
 window.api.on('qa:add', (it: Item) => addCard(it));
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') for (const c of Array.from(stack.children)) removeCard(c as HTMLElement);
+  if (e.key === 'Escape') for (const c of cards()) removeCard(c);
 });

@@ -1,5 +1,6 @@
-// Full-screen capture overlay: shows a frozen screenshot of one display and lets the user
-// drag out an area or pick a window. All drawing happens in physical pixels.
+// Full-screen capture overlay: shows a frozen screenshot of one display (or nothing, for a live
+// selection) and lets the user drag out an area, pick a window, pick a colour or measure.
+// All drawing happens in physical pixels.
 export {};
 
 interface WinRect {
@@ -10,12 +11,15 @@ interface WinRect {
   height: number;
 }
 
+type Mode = 'area' | 'window' | 'scrolling' | 'ocr' | 'record' | 'color' | 'measure';
+
 interface InitData {
   displayId: number;
-  mode: 'area' | 'window' | 'scrolling' | 'ocr';
+  mode: Mode;
   width: number;
   height: number;
-  pixels: Uint8Array; // BGRA
+  /** BGRA pixels of the frozen screen, or null for a live selection. */
+  pixels: Uint8Array | null;
   windows: WinRect[];
   cursor: { x: number; y: number };
   magnifier: boolean;
@@ -26,8 +30,15 @@ interface Pt {
   y: number;
 }
 
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 const canvas = document.getElementById('c') as HTMLCanvasElement;
-const ctx = canvas.getContext('2d', { alpha: false })!;
+const ctx = canvas.getContext('2d')!;
 const hint = document.getElementById('hint') as HTMLDivElement;
 
 const HINTS: Record<string, string> = {
@@ -35,16 +46,23 @@ const HINTS: Record<string, string> = {
   window: 'Click a window to capture it  ·  Space: area mode  ·  Esc: cancel',
   scrolling: 'Select the area to scroll-capture  ·  Esc: cancel',
   ocr: 'Select an area to copy its text  ·  Esc: cancel',
+  record: 'Drag an area to record  ·  Click: whole screen  ·  Space: window  ·  Esc: cancel',
+  recordWindow: 'Click a window to record it  ·  Space: area mode  ·  Esc: cancel',
+  color: 'Click to copy a colour  ·  Esc: cancel',
+  measure: 'Drag to measure  ·  Esc: close',
 };
 
 let data: InitData | null = null;
 let shot: ImageBitmap | null = null;
+let rgba: Uint8ClampedArray | null = null;
 let mouse: Pt | null = null; // CSS px
 let start: Pt | null = null;
 let dragging = false;
 let shiftKey = false;
 let windowMode = false;
 let hovered: WinRect | null = null;
+/** Ruler mode: the last measurement stays on screen. */
+let measured: Box | null = null;
 let done = false;
 let frame = 0;
 
@@ -73,14 +91,21 @@ window.api.on('overlay:init', async (d: InitData) => {
   done = false;
   dragging = false;
   start = null;
+  measured = null;
   windowMode = d.mode === 'window';
   const inside = d.cursor.x >= 0 && d.cursor.y >= 0 && d.cursor.x < innerWidth && d.cursor.y < innerHeight;
   mouse = inside ? d.cursor : null;
 
   shot?.close();
-  shot = await createImageBitmap(new ImageData(bgraToRgba(d.pixels), d.width, d.height));
+  shot = null;
+  rgba = null;
+  if (d.pixels) {
+    rgba = bgraToRgba(d.pixels);
+    shot = await createImageBitmap(new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, d.width, d.height));
+  }
   canvas.width = d.width;
   canvas.height = d.height;
+  document.body.classList.toggle('live', !shot);
   hovered = windowMode && mouse ? windowAt(mouse) : null;
   updateHint();
   draw();
@@ -90,23 +115,28 @@ window.api.on('overlay:init', async (d: InitData) => {
 window.api.on('overlay:reset', () => {
   shot?.close();
   shot = null;
+  rgba = null;
   data = null;
   hint.hidden = true;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 });
 
 function updateHint() {
   if (!data) return;
-  hint.textContent = HINTS[windowMode && data.mode === 'area' ? 'window' : data.mode] ?? '';
+  const key =
+    data.mode === 'record' && windowMode ? 'recordWindow' : windowMode && data.mode === 'area' ? 'window' : data.mode;
+  hint.textContent = HINTS[key] ?? '';
   hint.hidden = dragging;
 }
 
 const scale = () => canvas.width / innerWidth;
+const canPickWindows = () => data?.mode === 'area' || data?.mode === 'window' || data?.mode === 'record';
 
 function windowAt(p: Pt): WinRect | null {
   return data?.windows.find((w) => p.x >= w.x && p.x < w.x + w.width && p.y >= w.y && p.y < w.y + w.height) ?? null;
 }
 
-function clipToView(r: WinRect | { x: number; y: number; width: number; height: number }) {
+function clipToView(r: Box): Box {
   const x = Math.max(0, r.x);
   const y = Math.max(0, r.y);
   return {
@@ -117,7 +147,7 @@ function clipToView(r: WinRect | { x: number; y: number; width: number; height: 
   };
 }
 
-function selectionRect() {
+function selectionRect(): Box | null {
   if (!start || !mouse || !dragging) return null;
   let w = mouse.x - start.x;
   let h = mouse.y - start.y;
@@ -134,12 +164,13 @@ function selectionRect() {
   });
 }
 
-function pill(text: string, x: number, y: number, s: number, anchor: 'left' | 'center' = 'left') {
+function pill(text: string, x: number, y: number, s: number, anchor: 'left' | 'center' = 'left', swatch?: string) {
   ctx.font = `600 ${12 * s}px "Segoe UI", system-ui, sans-serif`;
   const tw = ctx.measureText(text).width;
   const padX = 8 * s;
+  const sw = swatch ? 16 * s : 0;
   const h = 22 * s;
-  const w = tw + padX * 2;
+  const w = tw + padX * 2 + sw;
   let px = anchor === 'center' ? x - w / 2 : x;
   px = Math.max(4 * s, Math.min(canvas.width - w - 4 * s, px));
   const py = Math.max(4 * s, Math.min(canvas.height - h - 4 * s, y));
@@ -147,21 +178,41 @@ function pill(text: string, x: number, y: number, s: number, anchor: 'left' | 'c
   ctx.beginPath();
   ctx.roundRect(px, py, w, h, 6 * s);
   ctx.fill();
+  if (swatch) {
+    ctx.fillStyle = swatch;
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = s;
+    ctx.beginPath();
+    ctx.roundRect(px + padX, py + 5 * s, 12 * s, 12 * s, 3 * s);
+    ctx.fill();
+    ctx.stroke();
+  }
   ctx.fillStyle = '#fff';
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, px + padX, py + h / 2 + 0.5 * s);
+  ctx.fillText(text, px + padX + sw, py + h / 2 + 0.5 * s);
 }
 
+/** Dims everything outside the box. The box keeps a trace of alpha so it still takes clicks. */
 function dimOutside(x: number, y: number, w: number, h: number, alpha: number) {
   ctx.fillStyle = `rgba(0,0,0,${alpha})`;
   ctx.fillRect(0, 0, canvas.width, y);
   ctx.fillRect(0, y + h, canvas.width, canvas.height - y - h);
   ctx.fillRect(0, y, x, h);
   ctx.fillRect(x + w, y, canvas.width - x - w, h);
+  if (!shot) {
+    ctx.fillStyle = 'rgba(0,0,0,0.01)';
+    ctx.fillRect(x, y, w, h);
+  }
+}
+
+function colorAt(cx: number, cy: number): string | null {
+  if (!rgba || !data || cx < 0 || cy < 0 || cx >= data.width || cy >= data.height) return null;
+  const i = (cy * data.width + cx) * 4;
+  return `#${[rgba[i], rgba[i + 1], rgba[i + 2]].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
 function drawMagnifier(m: Pt, s: number) {
-  if (!shot) return;
+  if (!shot || !data) return;
   const cells = 15;
   const size = 132 * s;
   const cell = size / cells;
@@ -207,20 +258,55 @@ function drawMagnifier(m: Pt, s: number) {
   ctx.stroke();
   ctx.restore();
 
-  pill(`${cx}, ${cy}`, x + size / 2, y + size + 8 * s, s, 'center');
+  if (data.mode === 'color') {
+    const c = colorAt(cx, cy);
+    if (c) pill(c.toUpperCase(), x + size / 2, y + size + 8 * s, s, 'center', c);
+  } else pill(`${cx}, ${cy}`, x + size / 2, y + size + 8 * s, s, 'center');
+}
+
+/** A measurement: the box, its size, and its diagonal. */
+function drawMeasure(r: Box, s: number) {
+  const x = r.x * s,
+    y = r.y * s,
+    w = r.width * s,
+    h = r.height * s;
+  ctx.fillStyle = 'rgba(255,45,149,0.12)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#ff2d95';
+  ctx.lineWidth = Math.max(1, s);
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.setLineDash([4 * s, 4 * s]);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w, y + h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  const diag = Math.hypot(w, h);
+  const label = `${Math.round(w)} × ${Math.round(h)} px  ·  ${Math.round(diag)} px diagonal`;
+  const below = y + h + 8 * s + 22 * s < canvas.height;
+  pill(label, x + w / 2, below ? y + h + 8 * s : y - 30 * s, s, 'center');
 }
 
 function draw() {
-  if (!shot || !data) return;
+  if (!data) return;
   const s = scale();
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(shot, 0, 0);
+  if (shot) ctx.drawImage(shot, 0, 0);
+  else ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const sel = selectionRect();
-  if (sel) {
-    const x = sel.x * s, y = sel.y * s, w = sel.width * s, h = sel.height * s;
+  if (data.mode === 'measure') {
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const r = sel ?? measured;
+    if (r) drawMeasure(r, s);
+  } else if (sel) {
+    const x = sel.x * s,
+      y = sel.y * s,
+      w = sel.width * s,
+      h = sel.height * s;
     dimOutside(x, y, w, h, 0.45);
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = data.mode === 'record' ? '#ff453a' : '#fff';
     ctx.lineWidth = Math.max(1, s);
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     const label = `${Math.round(w)} × ${Math.round(h)}`;
@@ -228,7 +314,10 @@ function draw() {
     pill(label, x + w / 2, below ? y + h + 8 * s : y + h - 30 * s, s, 'center');
   } else if (windowMode && hovered) {
     const r = clipToView(hovered);
-    const x = r.x * s, y = r.y * s, w = r.width * s, h = r.height * s;
+    const x = r.x * s,
+      y = r.y * s,
+      w = r.width * s,
+      h = r.height * s;
     dimOutside(x, y, w, h, 0.45);
     ctx.fillStyle = 'rgba(79,140,255,0.16)';
     ctx.fillRect(x, y, w, h);
@@ -238,11 +327,11 @@ function draw() {
     const title = hovered.title.length > 60 ? `${hovered.title.slice(0, 57)}…` : hovered.title;
     pill(`${title}  ·  ${Math.round(w)} × ${Math.round(h)}`, x + w / 2, y + h / 2 - 11 * s, s, 'center');
   } else {
-    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillStyle = data.mode === 'color' ? 'rgba(0,0,0,0.04)' : 'rgba(0,0,0,0.15)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
-  if (!windowMode && mouse && !dragging) {
+  if (!windowMode && mouse && !dragging && data.mode !== 'color') {
     const x = Math.floor(mouse.x * s) + 0.5;
     const y = Math.floor(mouse.y * s) + 0.5;
     ctx.lineWidth = 1;
@@ -272,10 +361,10 @@ function schedule() {
     });
 }
 
-function finish(rect: { x: number; y: number; width: number; height: number }) {
+function finish(result: { rect: Box; window?: boolean; title?: string; color?: string }) {
   if (done || !data) return;
   done = true;
-  window.api.send('overlay:result', { displayId: data.displayId, rect });
+  window.api.send('overlay:result', { displayId: data.displayId, ...result });
 }
 
 function cancel() {
@@ -300,21 +389,35 @@ window.addEventListener('mousedown', (e) => {
     cancel();
     return;
   }
-  if (e.button !== 0 || windowMode) return;
+  if (e.button !== 0 || windowMode || !data) return;
+  if (data.mode === 'color') {
+    const s = scale();
+    const c = colorAt(Math.floor(e.clientX * s), Math.floor(e.clientY * s));
+    if (c) finish({ rect: { x: e.clientX, y: e.clientY, width: 1, height: 1 }, color: c });
+    return;
+  }
   start = { x: e.clientX, y: e.clientY };
   dragging = false;
 });
 
 window.addEventListener('mouseup', (e) => {
-  if (e.button !== 0 || done) return;
+  if (e.button !== 0 || done || !data) return;
   if (windowMode) {
-    if (hovered) finish(clipToView(hovered));
+    if (hovered) finish({ rect: clipToView(hovered), window: true, title: hovered.title });
     return;
   }
   const r = selectionRect();
+  const wasDrag = dragging;
   start = null;
   dragging = false;
-  if (r && r.width >= 2 && r.height >= 2) finish(r);
+  if (data.mode === 'measure') {
+    if (r) measured = r;
+    updateHint();
+    schedule();
+    return;
+  }
+  if (r && r.width >= 2 && r.height >= 2) finish({ rect: r });
+  else if (data.mode === 'record' && !wasDrag) finish({ rect: { x: 0, y: 0, width: innerWidth, height: innerHeight } });
   else {
     updateHint();
     schedule();
@@ -323,7 +426,7 @@ window.addEventListener('mouseup', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') cancel();
-  else if (e.key === ' ' && data && (data.mode === 'area' || data.mode === 'window')) {
+  else if (e.key === ' ' && data && canPickWindows()) {
     windowMode = !windowMode;
     start = null;
     dragging = false;

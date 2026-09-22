@@ -1,0 +1,50 @@
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+.bar {
+  margin: 6px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 14px;
+  background: rgba(28, 28, 32, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+}
+
+#time {
+  flex: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff453a;
+  animation: pulse 1s infinite alternate;
+}
+
+@keyframes pulse {
+  to {
+    opacity: 0.3;
+  }
+}
+
+/* The same page draws the red outline around the recorded area (in its own window). */
+body.frame .bar {
+  display: none;
+}
+
+#frame {
+  position: fixed;
+  inset: 0;
+  border: 2px dashed #ff453a;
+  border-radius: 4px;
+}

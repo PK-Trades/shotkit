@@ -1,515 +1,161 @@
 // Annotation editor. Shapes are stored in image pixel coordinates; the canvas shows the
-// (optionally cropped) image plus an optional "beautify" background with padding.
-import { IconName, svg } from '../shared/icons';
+// (optionally cropped) image plus an optional "beautify" background, frame and padding.
+import { svg } from '../shared/icons';
+import { env } from './env';
+import { clamp, clone, inRect, intersects, norm, snapAngle, union } from './geometry';
+import { loadPrefs, Prefs, readShapeClipboard, savePrefs, writeShapeClipboard } from './prefs';
 import { findSensitive, PLURAL } from './redact';
-
-type ShapeType =
-  | 'arrow'
-  | 'line'
-  | 'rect'
-  | 'ellipse'
-  | 'blur'
-  | 'pixelate'
-  | 'pen'
-  | 'highlighter'
-  | 'text'
-  | 'counter'
-  | 'callout'
-  | 'spotlight'
-  | 'redact';
-type Tool = 'select' | 'crop' | ShapeType;
-
-interface P {
-  x: number;
-  y: number;
-}
-
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/**
- * Geometry by type:
- * - line/arrow: start (x, y), vector (w, h), optional `bend`
- * - rect/ellipse/blur/pixelate/spotlight/redact: box (x, y, w, h)
- * - pen: points
- * - highlighter: rects (one straight bar per highlighted text line)
- * - text: top-left (x, y), measured size (w, h), font size in `width`
- * - callout: like text, plus the tail's `tip`
- * - counter: centre (x, y), radius in `width`
- */
-interface Shape extends Rect {
-  id: number;
-  type: ShapeType;
-  color: string;
-  width: number;
-  filled?: boolean;
-  points?: P[];
-  rects?: Rect[];
-  /** Highlighter drawn over a dark background (uses a translucent overlay instead of multiply). */
-  dark?: boolean;
-  text?: string;
-  n?: number;
-  /** line/arrow: offset of the curve's control point from the midpoint of start and end. */
-  bend?: P;
-  /** arrow: an arrow style id; spotlight: 'rect' or 'ellipse'. */
-  style?: string;
-  /** callout: the point the tail points at. */
-  tip?: P;
-}
-
-interface Background {
-  enabled: boolean;
-  preset: string;
-  padding: number;
-  radius: number;
-  shadow: boolean;
-}
-
-interface Doc {
-  shapes: Shape[];
-  crop: Rect | null;
-  bg: Background;
-}
-
-/** A word found by OCR, in image pixels. */
-interface Word extends Rect {
-  text?: string;
-}
-
-/** A recognised line of text; `words` are sorted left to right. */
-interface TextLine {
-  words: Rect[];
-  box: Rect;
-}
-
-/** Position in the recognised text: line index (reading order) and word index. */
-interface Caret {
-  line: number;
-  word: number;
-}
+import { ASPECTS, computeView, isDarkArea, onRenderRequest, paintDoc, PRESETS, View } from './render';
+import {
+  bbox,
+  COLORS,
+  handles,
+  hasText,
+  hasTextBox,
+  HIGHLIGHTER_DEFAULT,
+  hit,
+  isBox,
+  isLine,
+  LINE_HEIGHT,
+  measureText,
+  OPTIONS,
+  REDACT_COLOR,
+  SIZE_LABELS,
+  sizeFor,
+  textWidth,
+  TOOLS,
+  translate,
+} from './shapes';
+import { Guides, snapBox, snapPoint } from './snap';
+import { Caret, caretAt, detectText, highlightRects, text as ocr } from './textlines';
+import { Doc, P, Rect, Shape, ShapeType, Tool, Word } from './types';
 
 type Action =
   | { kind: 'draw'; shape: Shape; start: P }
   | { kind: 'highlight'; shape: Shape; start: P; caret: Caret | null }
-  | { kind: 'move'; start: P; orig: Shape }
+  | { kind: 'move'; start: P; origs: Shape[]; moved: boolean }
   | { kind: 'handle'; idx: number; orig: Shape }
-  | { kind: 'crop'; start: P };
+  | { kind: 'marquee'; start: P; end: P; base: number[] }
+  | { kind: 'crop'; start: P }
+  | { kind: 'pan'; x: number; y: number; left: number; top: number };
 
-const TOOLS: { id: Tool; icon: IconName; label: string; key: string }[] = [
-  { id: 'select', icon: 'select', label: 'Select & move', key: 'v' },
-  { id: 'arrow', icon: 'arrow', label: 'Arrow', key: 'a' },
-  { id: 'line', icon: 'line', label: 'Line', key: 'l' },
-  { id: 'rect', icon: 'rect', label: 'Rectangle', key: 'r' },
-  { id: 'ellipse', icon: 'ellipse', label: 'Ellipse', key: 'o' },
-  { id: 'text', icon: 'text', label: 'Text', key: 't' },
-  { id: 'callout', icon: 'callout', label: 'Callout', key: 'm' },
-  { id: 'pen', icon: 'pen', label: 'Pen', key: 'p' },
-  { id: 'highlighter', icon: 'highlighter', label: 'Highlighter', key: 'h' },
-  { id: 'blur', icon: 'blur', label: 'Blur', key: 'b' },
-  { id: 'pixelate', icon: 'pixelate', label: 'Pixelate', key: 'x' },
-  { id: 'spotlight', icon: 'spotlight', label: 'Spotlight', key: 's' },
-  { id: 'counter', icon: 'counter', label: 'Numbered step', key: 'n' },
-  { id: 'crop', icon: 'crop', label: 'Crop', key: 'c' },
-];
-
-const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#bf5af2', '#ffffff', '#1c1c1e'];
-const STROKE = [3, 6, 10];
-const TEXT_SIZE = [20, 32, 48];
-const COUNTER_R = [13, 18, 24];
-const HIGHLIGHT_BAR = [14, 22, 32];
-const CALLOUT_SIZE = [16, 22, 30];
-const HIGHLIGHTER_DEFAULT = '#ffcc00';
-const REDACT_COLOR = '#111114';
-
-/** Shape types with a style picker, and their styles (the first is the default). */
-const STYLES: Partial<Record<ShapeType, { id: string; icon: IconName; label: string }[]>> = {
-  arrow: [
-    { id: 'solid', icon: 'arrowSolid', label: 'Standard arrow' },
-    { id: 'tapered', icon: 'arrowTapered', label: 'Tapered arrow' },
-    { id: 'open', icon: 'arrowOpen', label: 'Open arrowhead' },
-    { id: 'double', icon: 'arrowDouble', label: 'Double-headed arrow' },
-    { id: 'dashed', icon: 'arrowDashed', label: 'Dashed arrow' },
-  ],
-  spotlight: [
-    { id: 'rect', icon: 'rect', label: 'Rectangular spotlight' },
-    { id: 'ellipse', icon: 'ellipse', label: 'Round spotlight' },
-  ],
-};
-
-const PRESETS: { id: string; stops?: string[]; solid?: string }[] = [
-  { id: 'ocean', stops: ['#2e3192', '#1bffff'] },
-  { id: 'purple', stops: ['#7f00ff', '#e100ff'] },
-  { id: 'sunset', stops: ['#ff9a8b', '#ff6a88', '#ff99ac'] },
-  { id: 'peach', stops: ['#f6d365', '#fda085'] },
-  { id: 'mint', stops: ['#43e97b', '#38f9d7'] },
-  { id: 'candy', stops: ['#a18cd1', '#fbc2eb'] },
-  { id: 'fire', stops: ['#f83600', '#f9d423'] },
-  { id: 'night', stops: ['#0f2027', '#203a43', '#2c5364'] },
-  { id: 'white', solid: '#f5f5f7' },
-  { id: 'dark', solid: '#1c1c1e' },
-];
-
-const FONT = '"Segoe UI", system-ui, sans-serif';
-const font = (size: number) => `600 ${size}px ${FONT}`;
+interface EditorSettings {
+  format: 'png' | 'jpg' | 'webp';
+  exportScale: 'full' | '1x';
+  uploadService: string;
+}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('canvas');
 const ctx = canvas.getContext('2d')!;
 const stage = $('stage');
+const stageWrap = $('stageWrap');
 const textInput = $<HTMLTextAreaElement>('textInput');
 const cropBar = $('cropBar');
 const bgPanel = $('bgPanel');
+const menu = $('menu');
+const zoomLabel = $('zoomLabel');
 
-let img: HTMLImageElement;
-let imgW = 0;
-let imgH = 0;
-let unit = 1;
 let ready = false;
+let settings: EditorSettings = { format: 'png', exportScale: 'full', uploadService: 'none' };
 
 const doc: Doc = {
   shapes: [],
   crop: null,
-  bg: { enabled: false, preset: 'ocean', padding: 64, radius: 12, shadow: true },
+  bg: {
+    enabled: false,
+    preset: 'ocean',
+    padding: 64,
+    radius: 12,
+    shadow: true,
+    aspect: 'auto',
+    frame: 'none',
+    frameText: '',
+    frameTheme: 'auto',
+  },
 };
 
-let tool: Tool = 'arrow';
-let prevTool: Tool = 'arrow';
-let color = COLORS[0];
-let sizeIdx = 1;
-let filled = false;
-let selectedId: number | null = null;
+const prefs: Prefs = loadPrefs({
+  tool: 'arrow',
+  color: COLORS[0],
+  highlighterColor: HIGHLIGHTER_DEFAULT,
+  sizeIdx: 1,
+  filled: false,
+  opacity: 1,
+  options: {},
+  customColors: [],
+});
+
+let tool: Tool = prefs.tool === 'crop' ? 'arrow' : prefs.tool;
+let prevTool: Tool = tool === 'select' ? 'arrow' : tool;
+// The highlighter keeps its own colour (yellow by default), separate from the other tools.
+let color = tool === 'highlighter' ? prefs.highlighterColor : prefs.color;
+let sel: number[] = [];
 let nextId = 1;
 let action: Action | null = null;
 let pendingCrop: Rect | null = null;
 let editing: { shape: Shape; isNew: boolean } | null = null;
 let shiftDown = false;
-let textLines: TextLine[] = [];
-let textDetection: 'pending' | 'done' | 'failed' = 'pending';
-// The highlighter keeps its own colour (yellow by default), separate from the other tools.
-let highlighterColor = HIGHLIGHTER_DEFAULT;
-let drawColor = COLORS[0];
-const styles: Partial<Record<ShapeType, string>> = { arrow: 'solid', spotlight: 'rect' };
-/** OCR lines as Windows returned them, before merging into rows (used by auto-redact). */
-let ocrLines: Word[][] = [];
-let textReady: Promise<void> = Promise.resolve();
-const effectCache: Partial<Record<'blur' | 'pixelate', HTMLCanvasElement>> = {};
+let spaceDown = false;
+let guides: Guides = {};
+/** CSS pixels per device pixel of the canvas; null = fit the window. */
+let zoom: number | null = null;
+/** Where the current pointer press started, in client pixels. */
+let downClient: P = { x: 0, y: 0 };
+let pasteCount = 0;
 
 const undoStack: string[] = [];
 const redoStack: string[] = [];
 let lastState = '';
 
 // ---------------------------------------------------------------------------------------------
-// Geometry helpers
+// Selection and options
 // ---------------------------------------------------------------------------------------------
 
-const clone = (s: Shape): Shape => JSON.parse(JSON.stringify(s));
-const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const byId = (id: number) => doc.shapes.find((s) => s.id === id) ?? null;
+const selectedShapes = () => doc.shapes.filter((s) => sel.includes(s.id));
+const single = () => (sel.length === 1 ? byId(sel[0]) : null);
 
-function norm(r: Rect): Rect {
-  return { x: Math.min(r.x, r.x + r.w), y: Math.min(r.y, r.y + r.h), w: Math.abs(r.w), h: Math.abs(r.h) };
-}
-
-const inRect = (p: P, r: Rect, tol = 0) =>
-  p.x >= r.x - tol && p.x <= r.x + r.w + tol && p.y >= r.y - tol && p.y <= r.y + r.h + tol;
-
-function distToSeg(p: P, a: P, b: P): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy;
-  const t = len2 ? clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0, 1) : 0;
-  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
-}
-
-function isLight(hex: string): boolean {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  return 0.299 * r + 0.587 * g + 0.114 * b > 170;
-}
-
-function sizeFor(type: ShapeType, i: number): number {
-  if (type === 'text') return TEXT_SIZE[i] * unit;
-  if (type === 'counter') return COUNTER_R[i] * unit;
-  if (type === 'highlighter') return HIGHLIGHT_BAR[i] * unit;
-  if (type === 'callout') return CALLOUT_SIZE[i] * unit;
-  return STROKE[i] * unit;
-}
-
-const selected = () => doc.shapes.find((s) => s.id === selectedId) ?? null;
-
-/** The selection shows (and can be edited) in the select tool, and right after drawing a shape. */
+/** A single selection shows its handles in the select tool, and right after drawing a shape. */
 function visibleSelection(): Shape | null {
-  const s = selected();
+  const s = single();
   return s && (tool === 'select' || s.type === tool) ? s : null;
 }
 
-const isBox = (t: ShapeType) =>
-  t === 'rect' || t === 'ellipse' || t === 'blur' || t === 'pixelate' || t === 'spotlight' || t === 'redact';
-
-// ---------------------------------------------------------------------------------------------
-// Curves
-// ---------------------------------------------------------------------------------------------
-
-/** Points along a line or arrow; a bent one is sampled along its quadratic curve. */
-function linePoints(s: Shape): P[] {
-  const a = { x: s.x, y: s.y };
-  const b = { x: s.x + s.w, y: s.y + s.h };
-  if (!s.bend) return [a, b];
-  const c = { x: s.x + s.w / 2 + s.bend.x, y: s.y + s.h / 2 + s.bend.y };
-  const pts: P[] = [];
-  for (let i = 0; i <= 48; i++) {
-    const t = i / 48;
-    const u = 1 - t;
-    pts.push({ x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y });
-  }
-  return pts;
+/** The shapes that toolbar changes (colour, size, style…) apply to. */
+function targets(): Shape[] {
+  if (tool === 'select') return selectedShapes();
+  const s = visibleSelection();
+  return s ? [s] : [];
 }
 
-/** Where the curve handle sits: the middle of the curve. */
-const bendHandle = (s: Shape): P => ({
-  x: s.x + s.w / 2 + (s.bend?.x ?? 0) / 2,
-  y: s.y + s.h / 2 + (s.bend?.y ?? 0) / 2,
-});
-
-function pathLength(pts: P[]): number {
-  let len = 0;
-  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-  return len;
+function option(type: ShapeType, key: string): string | undefined {
+  return prefs.options[type]?.[key] ?? OPTIONS[type]?.find((g) => g.key === key)?.items[0].id;
 }
 
-/** The part of a polyline between two distances along it. */
-function slicePath(pts: P[], from: number, to: number): P[] {
-  const out: P[] = [];
-  let acc = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i];
-    const b = pts[i + 1];
-    const seg = Math.hypot(b.x - a.x, b.y - a.y);
-    const s0 = acc;
-    acc += seg;
-    if (!seg || acc < from || s0 > to) continue;
-    const at = (d: number) => ({ x: a.x + ((b.x - a.x) * (d - s0)) / seg, y: a.y + ((b.y - a.y) * (d - s0)) / seg });
-    if (!out.length) out.push(at(Math.max(from, s0)));
-    out.push(at(Math.min(to, acc)));
-  }
-  return out;
-}
-
-const pointAlong = (pts: P[], d: number): P => slicePath(pts, d, d)[0] ?? pts[0];
-
-function distToPath(p: P, pts: P[]): number {
-  let best = Infinity;
-  for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distToSeg(p, pts[i], pts[i + 1]));
-  return best;
+function savePrefsSoon() {
+  prefs.tool = tool === 'crop' ? prevTool : tool;
+  if (tool === 'highlighter') prefs.highlighterColor = color;
+  else prefs.color = color;
+  savePrefs(prefs);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Callouts
+// View mapping, zoom and pan
 // ---------------------------------------------------------------------------------------------
 
-/** The bubble around a callout's text. */
-function calloutBox(s: Shape): Rect {
-  const px = s.width * 0.6;
-  const py = s.width * 0.4;
-  return { x: s.x - px, y: s.y - py, w: s.w + px * 2, h: s.h + py * 2 };
-}
-
-/** The tail triangle, wound the same way as the bubble so that the two fill as one shape. */
-function calloutTail(s: Shape): P[] | null {
-  const b = calloutBox(s);
-  const t = s.tip;
-  if (!t || inRect(t, b)) return null;
-  const c = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-  const len = Math.hypot(t.x - c.x, t.y - c.y);
-  const dx = (t.x - c.x) / len;
-  const dy = (t.y - c.y) / len;
-  // The tail starts where the line to the tip leaves the bubble (tucked in a little so the two
-  // join seamlessly), which keeps it wide at the bubble's edge.
-  const toEdge = Math.min(dx ? b.w / 2 / Math.abs(dx) : Infinity, dy ? b.h / 2 / Math.abs(dy) : Infinity);
-  const half = Math.min(b.h * 0.3, b.w * 0.2);
-  const back = Math.max(0, toEdge - half * 1.5);
-  const base = { x: c.x + dx * back, y: c.y + dy * back };
-  const p1 = { x: base.x - dy * half, y: base.y + dx * half };
-  const p2 = { x: base.x + dy * half, y: base.y - dx * half };
-  // roundRect() runs clockwise on screen, which is a positive signed area with y pointing down.
-  const area = (t.x - p1.x) * (p2.y - p1.y) - (p2.x - p1.x) * (t.y - p1.y);
-  return area > 0 ? [p1, t, p2] : [p2, t, p1];
-}
-
-// ---------------------------------------------------------------------------------------------
-// Text-aware highlighter
-// ---------------------------------------------------------------------------------------------
-
-function union(rs: Rect[]): Rect {
-  const x = Math.min(...rs.map((r) => r.x));
-  const y = Math.min(...rs.map((r) => r.y));
-  return { x, y, w: Math.max(...rs.map((r) => r.x + r.w)) - x, h: Math.max(...rs.map((r) => r.y + r.h)) - y };
-}
-
-/** Distance from a point to a rectangle (0 when inside). */
-function rectDistance(r: Rect, p: P): number {
-  const dx = Math.max(r.x - p.x, 0, p.x - (r.x + r.w));
-  const dy = Math.max(r.y - p.y, 0, p.y - (r.y + r.h));
-  return Math.hypot(dx, dy);
-}
-
-/**
- * Finds the word nearest to `p`. When `strict`, the point must be on (or very close to) a line
- * of text; otherwise it snaps to the nearest line wherever the pointer is.
- */
-function caretAt(p: P, strict: boolean): Caret | null {
-  let line = -1;
-  if (strict) {
-    // Must start on a line of text, or in the white space just beside it (like a text selection).
-    let best = Infinity;
-    textLines.forEach((l, i) => {
-      const dx = Math.max(l.box.x - p.x, 0, p.x - (l.box.x + l.box.w));
-      const dy = Math.max(l.box.y - p.y, 0, p.y - (l.box.y + l.box.h));
-      if (dy > l.box.h * 0.5 || dx > l.box.h * 3) return;
-      const d = rectDistance(l.box, p);
-      if (d < best) {
-        best = d;
-        line = i;
-      }
-    });
-    if (line < 0) return null;
-  } else {
-    // Like a text selection: pick the line by vertical position first, and only use
-    // horizontal distance to choose between lines at the same height (e.g. columns).
-    const dy = (l: TextLine) => Math.max(l.box.y - p.y, 0, p.y - (l.box.y + l.box.h));
-    const dx = (l: TextLine) => Math.max(l.box.x - p.x, 0, p.x - (l.box.x + l.box.w));
-    const minDy = Math.min(...textLines.map(dy));
-    let best = Infinity;
-    textLines.forEach((l, i) => {
-      if (dy(l) > minDy + 2) return;
-      if (dx(l) < best) {
-        best = dx(l);
-        line = i;
-      }
-    });
-    if (line < 0) return null;
-  }
-  let word = 0;
-  let wordDist = Infinity;
-  textLines[line].words.forEach((w, j) => {
-    const d = Math.max(w.x - p.x, 0, p.x - (w.x + w.w));
-    if (d < wordDist) {
-      wordDist = d;
-      word = j;
-    }
-  });
-  return { line, word };
-}
-
-/** One straight bar per text line between two carets, like a text selection. */
-function highlightRects(a: Caret, b: Caret): Rect[] {
-  const [s, e] = a.line < b.line || (a.line === b.line && a.word <= b.word) ? [a, b] : [b, a];
-  const first = textLines[s.line].box;
-  const last = textLines[e.line].box;
-  const minX = Math.min(first.x, last.x);
-  const maxX = Math.max(first.x + first.w, last.x + last.w);
-  const rects: Rect[] = [];
-  for (let i = s.line; i <= e.line; i++) {
-    const l = textLines[i];
-    // Skip lines in the reading order that belong to another column.
-    if (i !== s.line && i !== e.line && (l.box.x > maxX || l.box.x + l.box.w < minX)) continue;
-    const from = i === s.line ? s.word : 0;
-    const to = i === e.line ? e.word : l.words.length - 1;
-    if (from > to) continue;
-    const x1 = l.words[from].x;
-    const x2 = l.words[to].x + l.words[to].w;
-    const padX = l.box.h * 0.15;
-    const padY = l.box.h * 0.12;
-    rects.push({ x: x1 - padX, y: l.box.y - padY, w: x2 - x1 + padX * 2, h: l.box.h + padY * 2 });
-  }
-  return rects;
-}
-
-const sampler = document.createElement('canvas');
-sampler.width = sampler.height = 16;
-const samplerCtx = sampler.getContext('2d', { willReadFrequently: true })!;
-
-/** Whether the image under `r` is mostly dark (average luminance below mid-grey). */
-function isDarkArea(r: Rect): boolean {
-  const x = clamp(r.x, 0, imgW - 1);
-  const y = clamp(r.y, 0, imgH - 1);
-  const w = clamp(r.x + r.w, x + 1, imgW) - x;
-  const h = clamp(r.y + r.h, y + 1, imgH) - y;
-  samplerCtx.clearRect(0, 0, 16, 16);
-  samplerCtx.drawImage(img, x, y, w, h, 0, 0, 16, 16);
-  const d = samplerCtx.getImageData(0, 0, 16, 16).data;
-  let sum = 0;
-  for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-  return sum / (d.length / 4) < 110;
-}
-
-function updateHighlight(a: Extract<Action, { kind: 'highlight' }>, p: P) {
-  if (a.caret) {
-    const end = caretAt(p, false);
-    a.shape.rects = end ? highlightRects(a.caret, end) : [];
-  } else {
-    // No text under the starting point: a straight horizontal bar that follows the drag.
-    const h = a.shape.width;
-    a.shape.rects = [{ x: Math.min(a.start.x, p.x), y: a.start.y - h / 2, w: Math.abs(p.x - a.start.x), h }];
-  }
-  if (a.shape.rects.length) a.shape.dark = isDarkArea(union(a.shape.rects));
-}
-
-async function detectText() {
-  try {
-    const lines = await window.api.invoke<Word[][]>('editor:words');
-    ocrLines = lines;
-    // Windows OCR splits a visual row into several lines at wide gaps (e.g. a line number and
-    // the code after it). Merge pieces on the same row that are reasonably close together.
-    const rows: Rect[][] = [];
-    for (const words of [...lines].sort((a, b) => union(a).x - union(b).x)) {
-      const box = union(words);
-      const row = rows.find((r) => {
-        const rb = union(r);
-        const overlap = Math.min(rb.y + rb.h, box.y + box.h) - Math.max(rb.y, box.y);
-        const gap = box.x - (rb.x + rb.w);
-        return overlap >= Math.min(rb.h, box.h) * 0.5 && gap <= Math.max(rb.h, box.h) * 4;
-      });
-      if (row) row.push(...words);
-      else rows.push([...words]);
-    }
-    textLines = rows
-      .map((words) => {
-        const sorted = [...words].sort((a, b) => a.x - b.x);
-        return { words: sorted, box: union(sorted) };
-      })
-      .sort((a, b) => a.box.y + a.box.h / 2 - (b.box.y + b.box.h / 2) || a.box.x - b.box.x);
-    textDetection = 'done';
-  } catch {
-    textDetection = 'failed';
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// View mapping
-// ---------------------------------------------------------------------------------------------
-
-function view() {
-  const cropping = tool === 'crop';
-  const base: Rect = !cropping && doc.crop ? doc.crop : { x: 0, y: 0, w: imgW, h: imgH };
-  const bgOn = doc.bg.enabled && !cropping;
-  const pad = bgOn ? Math.round(doc.bg.padding * unit) : 0;
-  const radius = bgOn ? Math.min(doc.bg.radius * unit, base.w / 2, base.h / 2) : 0;
-  return { base, pad, radius, bgOn };
-}
+const view = (): View => computeView(doc, tool === 'crop');
 
 /** CSS pixels per canvas pixel. */
 const viewScale = () => canvas.getBoundingClientRect().width / canvas.width || 1;
+env.viewScale = viewScale;
 
 function toImg(e: { clientX: number; clientY: number }): P {
   const r = canvas.getBoundingClientRect();
   const v = view();
   return {
-    x: ((e.clientX - r.left) * canvas.width) / r.width - v.pad + v.base.x,
-    y: ((e.clientY - r.top) * canvas.height) / r.height - v.pad + v.base.y,
+    x: ((e.clientX - r.left) * canvas.width) / r.width - v.imgX + v.base.x,
+    y: ((e.clientY - r.top) * canvas.height) / r.height - v.imgY + v.base.y,
   };
 }
 
@@ -517,386 +163,111 @@ function toClient(p: P): P {
   const r = canvas.getBoundingClientRect();
   const v = view();
   const k = r.width / canvas.width;
-  return { x: r.left + (p.x - v.base.x + v.pad) * k, y: r.top + (p.y - v.base.y + v.pad) * k };
+  return { x: r.left + (p.x - v.base.x + v.imgX) * k, y: r.top + (p.y - v.base.y + v.imgY) * k };
 }
 
-function layout() {
-  const st = stage.getBoundingClientRect();
+function fitScale(): number {
   const dpr = window.devicePixelRatio || 1;
   const natW = canvas.width / dpr;
   const natH = canvas.height / dpr;
-  const f = Math.min(1, (st.width - 64) / natW, (st.height - 64) / natH);
-  canvas.style.width = `${Math.max(1, natW * f)}px`;
-  canvas.style.height = `${Math.max(1, natH * f)}px`;
+  return Math.min(1, (stage.clientWidth - 64) / natW, (stage.clientHeight - 64) / natH);
+}
+
+function layout() {
+  const dpr = window.devicePixelRatio || 1;
+  const k = zoom ?? fitScale();
+  canvas.style.width = `${Math.max(1, (canvas.width / dpr) * k)}px`;
+  canvas.style.height = `${Math.max(1, (canvas.height / dpr) * k)}px`;
+  // Show crisp pixels once each image pixel covers two or more screen pixels.
+  canvas.classList.toggle('pixelated', k >= 2);
+  zoomLabel.textContent = `${Math.round(k * 100)}%`;
+  zoomLabel.classList.toggle('fit', zoom === null);
   if (editing) positionTextInput();
 }
+
+/** Zooms to `k`, keeping the point under `anchor` (client px; default: the stage's centre) in place. */
+function setZoom(k: number | null, anchor?: P) {
+  const sr = stage.getBoundingClientRect();
+  const a = anchor ?? { x: sr.left + sr.width / 2, y: sr.top + sr.height / 2 };
+  const r = canvas.getBoundingClientRect();
+  const fx = (a.x - r.left) / r.width;
+  const fy = (a.y - r.top) / r.height;
+  zoom = k === null ? null : clamp(k, 0.05, 16);
+  layout();
+  const r2 = canvas.getBoundingClientRect();
+  stage.scrollLeft += r2.left + fx * r2.width - a.x;
+  stage.scrollTop += r2.top + fy * r2.height - a.y;
+}
+
+const currentZoom = () => zoom ?? fitScale();
 
 // ---------------------------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------------------------
 
-function effect(kind: 'blur' | 'pixelate'): HTMLCanvasElement {
-  const cached = effectCache[kind];
-  if (cached) return cached;
-  const cv = document.createElement('canvas');
-  cv.width = imgW;
-  cv.height = imgH;
-  const c = cv.getContext('2d')!;
-  if (kind === 'blur') {
-    c.drawImage(img, 0, 0);
-    c.filter = `blur(${Math.round(12 * unit)}px)`;
-    c.drawImage(img, 0, 0);
-    c.filter = 'none';
-  } else {
-    const block = Math.max(6, Math.round(10 * unit));
-    const sw = Math.ceil(imgW / block);
-    const sh = Math.ceil(imgH / block);
-    const small = document.createElement('canvas');
-    small.width = sw;
-    small.height = sh;
-    small.getContext('2d')!.drawImage(img, 0, 0, sw * block, sh * block, 0, 0, sw, sh);
-    c.imageSmoothingEnabled = false;
-    c.drawImage(small, 0, 0, sw * block, sh * block);
-  }
-  effectCache[kind] = cv;
-  return cv;
+function shapesToDraw(): Shape[] {
+  const list = doc.shapes.filter((s) => s.id !== editing?.shape.id);
+  if (action?.kind === 'draw' || action?.kind === 'highlight') list.push(action.shape);
+  // A callout or pill keeps its box while its text is being typed.
+  if (editing && hasTextBox(editing.shape)) list.push({ ...editing.shape, text: '' });
+  return list;
 }
 
-function strokePoints(c: CanvasRenderingContext2D, pts: P[]) {
-  if (pts.length === 1) {
-    c.beginPath();
-    c.arc(pts[0].x, pts[0].y, c.lineWidth / 2, 0, Math.PI * 2);
-    c.fill();
-    return;
-  }
-  c.beginPath();
-  c.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length - 1; i++) {
-    c.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
-  }
-  const last = pts[pts.length - 1];
-  c.lineTo(last.x, last.y);
-  c.stroke();
-}
-
-function strokePath(c: CanvasRenderingContext2D, pts: P[]) {
-  if (pts.length < 2) return;
-  c.beginPath();
-  c.moveTo(pts[0].x, pts[0].y);
-  for (const p of pts.slice(1)) c.lineTo(p.x, p.y);
-  c.stroke();
-}
-
-/** A shaft that widens from a thin tail to the arrowhead. */
-function fillTapered(c: CanvasRenderingContext2D, pts: P[], width: number) {
-  const total = pathLength(pts);
-  if (pts.length < 2 || !total) return;
-  const left: P[] = [];
-  const right: P[] = [];
-  let acc = 0;
-  pts.forEach((p, i) => {
-    if (i) acc += Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
-    const a = pts[Math.max(0, i - 1)];
-    const b = pts[Math.min(pts.length - 1, i + 1)];
-    const d = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-    const half = width * (0.12 + 0.63 * (acc / total));
-    const nx = (-(b.y - a.y) / d) * half;
-    const ny = ((b.x - a.x) / d) * half;
-    left.push({ x: p.x + nx, y: p.y + ny });
-    right.push({ x: p.x - nx, y: p.y - ny });
-  });
-  c.beginPath();
-  c.arc(pts[0].x, pts[0].y, width * 0.12, 0, Math.PI * 2);
-  c.fill();
-  c.beginPath();
-  for (const p of [...left, ...right.reverse()]) c.lineTo(p.x, p.y);
-  c.closePath();
-  c.fill();
-}
-
-/** An arrowhead at `tip`, pointing away from `from`. */
-function drawHead(c: CanvasRenderingContext2D, tip: P, from: P, head: number, open: boolean) {
-  const ang = Math.atan2(tip.y - from.y, tip.x - from.x);
-  const cos = Math.cos(ang);
-  const sin = Math.sin(ang);
-  const hw = head * (open ? 0.55 : 0.62);
-  const bx = tip.x - cos * head;
-  const by = tip.y - sin * head;
-  c.beginPath();
-  c.moveTo(bx - sin * hw, by + cos * hw);
-  c.lineTo(tip.x, tip.y);
-  c.lineTo(bx + sin * hw, by - cos * hw);
-  if (open) {
-    c.stroke();
-    return;
-  }
-  c.closePath();
-  const lw = c.lineWidth;
-  c.lineWidth = Math.max(1, lw * 0.5);
-  c.fill();
-  c.stroke();
-  c.lineWidth = lw;
-}
-
-function drawArrow(c: CanvasRenderingContext2D, s: Shape) {
-  const pts = linePoints(s);
-  const len = pathLength(pts);
-  if (len < 1) return;
-  const style = s.style ?? 'solid';
-  const double = style === 'double';
-  const open = style === 'open';
-  const head = Math.min(len * (double ? 0.4 : 0.7), Math.max(s.width * 3.4, 12 * unit));
-  // Filled heads cover the end of the shaft; an open head needs the shaft to reach the tip.
-  const inset = open ? 0 : head * 0.7;
-  const shaft = slicePath(pts, double ? inset : 0, len - inset);
-  if (style === 'tapered') fillTapered(c, shaft, s.width);
-  else {
-    if (style === 'dashed') c.setLineDash([s.width * 1.5, s.width * 2.5]);
-    strokePath(c, shaft);
-    c.setLineDash([]);
-  }
-  // Aim each head along the last stretch of the path so that it follows a curve.
-  drawHead(c, pts[pts.length - 1], pointAlong(pts, len - head), head, open);
-  if (double) drawHead(c, pts[0], pointAlong(pts, head), head, false);
-}
-
-function drawText(c: CanvasRenderingContext2D, s: Shape, outline = true) {
-  const lh = s.width * 1.25;
-  const off = (lh - s.width) / 2;
-  c.font = font(s.width);
-  c.textBaseline = 'top';
-  c.lineWidth = Math.max(2, s.width * 0.18);
-  c.strokeStyle = isLight(s.color) ? 'rgba(0,0,0,0.85)' : '#ffffff';
-  (s.text ?? '').split('\n').forEach((line, i) => {
-    const y = s.y + i * lh + off;
-    if (outline) c.strokeText(line, s.x, y);
-    c.fillText(line, s.x, y);
-  });
-}
-
-function drawCallout(c: CanvasRenderingContext2D, s: Shape) {
-  const b = calloutBox(s);
-  c.beginPath();
-  c.roundRect(b.x, b.y, b.w, b.h, Math.min(s.width * 0.5, b.h / 2));
-  const tail = calloutTail(s);
-  if (tail) {
-    c.moveTo(tail[0].x, tail[0].y);
-    c.lineTo(tail[1].x, tail[1].y);
-    c.lineTo(tail[2].x, tail[2].y);
-    c.closePath();
-  }
-  c.fill();
-  c.shadowColor = 'transparent';
-  c.fillStyle = isLight(s.color) ? '#1c1c1e' : '#ffffff';
-  drawText(c, s, false);
-}
-
-/** Sets a text or callout shape's size from its text. */
-function measureText(s: Shape, text = s.text ?? '') {
-  ctx.save();
-  ctx.font = font(s.width);
-  const lines = text.split('\n');
-  const min = s.type === 'callout' ? s.width : 1;
-  s.w = Math.max(...lines.map((l) => ctx.measureText(l).width), min);
-  s.h = lines.length * s.width * 1.25;
-  ctx.restore();
-}
-
-let dimCanvas: HTMLCanvasElement | null = null;
-
-/** Dims the image outside every spotlight (together, so that overlapping ones don't stack). */
-function paintSpotlights(c: CanvasRenderingContext2D, spots: Shape[]) {
-  if (!spots.length) return;
-  const cv = (dimCanvas ??= document.createElement('canvas'));
-  if (cv.width !== imgW || cv.height !== imgH) {
-    cv.width = imgW;
-    cv.height = imgH;
-  }
-  const d = cv.getContext('2d')!;
-  d.globalCompositeOperation = 'copy';
-  d.fillStyle = 'rgba(0,0,0,0.6)';
-  d.fillRect(0, 0, imgW, imgH);
-  d.globalCompositeOperation = 'destination-out';
-  d.fillStyle = '#000';
-  for (const s of spots) {
-    const r = norm(s);
-    d.beginPath();
-    if (s.style === 'ellipse') d.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
-    else d.roundRect(r.x, r.y, r.w, r.h, Math.min(6 * unit, r.w / 2, r.h / 2));
-    d.fill();
-  }
-  c.drawImage(cv, 0, 0);
-}
-
-function drawShape(c: CanvasRenderingContext2D, s: Shape) {
+function drawSelection(c: CanvasRenderingContext2D) {
+  const k = 1 / viewScale();
+  const shown = tool === 'select' ? selectedShapes() : [visibleSelection()].filter((s): s is Shape => !!s);
   c.save();
-  c.strokeStyle = s.color;
-  c.fillStyle = s.color;
-  c.lineWidth = s.width;
-  c.lineCap = 'round';
-  c.lineJoin = 'round';
-  const shadow = () => {
-    c.shadowColor = 'rgba(0,0,0,0.3)';
-    c.shadowBlur = 4 * unit;
-    c.shadowOffsetY = 1.5 * unit;
-  };
-  switch (s.type) {
-    case 'line':
-      shadow();
-      strokePath(c, linePoints(s));
-      break;
-    case 'arrow':
-      shadow();
-      drawArrow(c, s);
-      break;
-    case 'rect': {
-      shadow();
-      const r = norm(s);
-      c.beginPath();
-      c.roundRect(r.x, r.y, r.w, r.h, Math.min(s.width, r.w / 2, r.h / 2));
-      if (s.filled) c.fill();
-      else c.stroke();
-      break;
+  c.strokeStyle = '#4f8cff';
+  c.lineWidth = 1.5 * k;
+  for (const s of shown) {
+    if (editing?.shape.id === s.id) continue;
+    // Lines and arrows being drawn show only their handles; a box around a line is just noise.
+    if (tool === 'select' || !isLine(s.type)) {
+      const b = bbox(s);
+      c.setLineDash([5 * k, 4 * k]);
+      c.strokeRect(b.x - 4 * k, b.y - 4 * k, b.w + 8 * k, b.h + 8 * k);
+      c.setLineDash([]);
     }
-    case 'ellipse': {
-      shadow();
-      const r = norm(s);
+  }
+  const s = visibleSelection();
+  if (s && editing?.shape.id !== s.id) {
+    handles(s).forEach((h, i) => {
+      c.fillStyle = '#fff';
       c.beginPath();
-      c.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
-      if (s.filled) c.fill();
-      else c.stroke();
-      break;
-    }
-    case 'blur':
-    case 'pixelate': {
-      const r = norm(s);
-      const x = clamp(r.x, 0, imgW);
-      const y = clamp(r.y, 0, imgH);
-      const w = clamp(r.x + r.w, 0, imgW) - x;
-      const h = clamp(r.y + r.h, 0, imgH) - y;
-      if (w >= 1 && h >= 1) c.drawImage(effect(s.type), x, y, w, h, x, y, w, h);
-      break;
-    }
-    case 'pen':
-      shadow();
-      strokePoints(c, s.points ?? []);
-      break;
-    case 'highlighter':
-      // On light backgrounds multiply keeps dark text fully readable, like a real highlighter;
-      // on dark backgrounds multiply would vanish, so use a translucent overlay instead.
-      // All bars go in one path so overlapping parts aren't darkened twice.
-      c.globalCompositeOperation = s.dark ? 'source-over' : 'multiply';
-      c.globalAlpha = s.dark ? 0.4 : 0.75;
-      c.beginPath();
-      for (const r of s.rects ?? []) {
-        if (r.w > 0 && r.h > 0) c.roundRect(r.x, r.y, r.w, r.h, Math.min(r.h * 0.2, 4 * unit));
-      }
+      // Round handles bend a line or arrow, or move what a magnifier magnifies.
+      if ((isLine(s.type) && i === 2) || (s.type === 'magnifier' && i === 4) || s.type === 'callout') {
+        c.arc(h.x, h.y, 5.5 * k, 0, Math.PI * 2);
+      } else c.rect(h.x - 5 * k, h.y - 5 * k, 10 * k, 10 * k);
       c.fill();
-      break;
-    case 'text':
-      drawText(c, s);
-      break;
-    case 'callout':
-      shadow();
-      drawCallout(c, s);
-      break;
-    case 'redact': {
-      const r = norm(s);
-      c.beginPath();
-      c.roundRect(r.x, r.y, r.w, r.h, Math.min(2 * unit, r.w / 2, r.h / 2));
-      c.fill();
-      break;
-    }
-    case 'spotlight':
-      // Painted for all spotlights at once by paintSpotlights().
-      break;
-    case 'counter':
-      shadow();
-      c.beginPath();
-      c.arc(s.x, s.y, s.width, 0, Math.PI * 2);
-      c.fill();
-      c.shadowColor = 'transparent';
-      c.lineWidth = Math.max(1.5, s.width * 0.14);
-      c.strokeStyle = '#fff';
       c.stroke();
-      c.fillStyle = isLight(s.color) ? '#1c1c1e' : '#fff';
-      c.font = `700 ${s.width * 1.1}px ${FONT}`;
-      c.textAlign = 'center';
-      c.textBaseline = 'middle';
-      c.fillText(String(s.n ?? 1), s.x, s.y + s.width * 0.05);
-      break;
+    });
+  }
+  if (action?.kind === 'marquee') {
+    const r = norm({ x: action.start.x, y: action.start.y, w: action.end.x - action.start.x, h: action.end.y - action.start.y });
+    c.fillStyle = 'rgba(79,140,255,0.12)';
+    c.fillRect(r.x, r.y, r.w, r.h);
+    c.strokeRect(r.x, r.y, r.w, r.h);
   }
   c.restore();
 }
 
-function bbox(s: Shape): Rect {
-  switch (s.type) {
-    case 'line':
-    case 'arrow': {
-      const r = union(linePoints(s).map((p) => ({ ...p, w: 0, h: 0 })));
-      const m = s.width / 2;
-      return { x: r.x - m, y: r.y - m, w: r.w + 2 * m, h: r.h + 2 * m };
-    }
-    case 'callout':
-      return s.tip ? union([calloutBox(s), { ...s.tip, w: 0, h: 0 }]) : calloutBox(s);
-    case 'highlighter':
-      return s.rects?.length ? union(s.rects) : { x: s.x, y: s.y, w: 0, h: 0 };
-    case 'pen': {
-      const xs = (s.points ?? []).map((p) => p.x);
-      const ys = (s.points ?? []).map((p) => p.y);
-      const m = s.width / 2;
-      const x = Math.min(...xs) - m;
-      const y = Math.min(...ys) - m;
-      return { x, y, w: Math.max(...xs) + m - x, h: Math.max(...ys) + m - y };
-    }
-    case 'counter':
-      return { x: s.x - s.width, y: s.y - s.width, w: s.width * 2, h: s.width * 2 };
-    default:
-      return norm(s);
-  }
-}
-
-function handles(s: Shape): P[] {
-  if (s.type === 'line' || s.type === 'arrow') {
-    return [{ x: s.x, y: s.y }, { x: s.x + s.w, y: s.y + s.h }, bendHandle(s)];
-  }
-  if (s.type === 'callout') return s.tip ? [s.tip] : [];
-  if (isBox(s.type)) {
-    const r = norm(s);
-    return [
-      { x: r.x, y: r.y },
-      { x: r.x + r.w, y: r.y },
-      { x: r.x + r.w, y: r.y + r.h },
-      { x: r.x, y: r.y + r.h },
-    ];
-  }
-  return [];
-}
-
-function drawSelection(c: CanvasRenderingContext2D) {
-  const s = visibleSelection();
-  if (!s || editing?.shape.id === s.id) return;
+function drawGuides(c: CanvasRenderingContext2D, v: View) {
+  if (guides.x === undefined && guides.y === undefined) return;
   const k = 1 / viewScale();
-  const b = bbox(s);
-  const line = s.type === 'line' || s.type === 'arrow';
+  const b = v.base;
   c.save();
-  c.strokeStyle = '#4f8cff';
-  c.lineWidth = 1.5 * k;
-  // Lines and arrows show only their handles; a box around a diagonal line is just noise.
-  if (!line || tool === 'select') {
-    c.setLineDash([5 * k, 4 * k]);
-    c.strokeRect(b.x - 4 * k, b.y - 4 * k, b.w + 8 * k, b.h + 8 * k);
-    c.setLineDash([]);
+  c.strokeStyle = '#ff2d95';
+  c.lineWidth = k;
+  c.beginPath();
+  if (guides.x !== undefined) {
+    c.moveTo(guides.x, b.y);
+    c.lineTo(guides.x, b.y + b.h);
   }
-  handles(s).forEach((h, i) => {
-    c.fillStyle = '#fff';
-    c.beginPath();
-    // The round handle bends a line or arrow into a curve.
-    if (line && i === 2) c.arc(h.x, h.y, 5.5 * k, 0, Math.PI * 2);
-    else c.rect(h.x - 5 * k, h.y - 5 * k, 10 * k, 10 * k);
-    c.fill();
-    c.stroke();
-  });
+  if (guides.y !== undefined) {
+    c.moveTo(b.x, guides.y);
+    c.lineTo(b.x + b.w, guides.y);
+  }
+  c.stroke();
   c.restore();
 }
 
@@ -907,7 +278,7 @@ function drawCropUI(c: CanvasRenderingContext2D) {
   c.save();
   c.fillStyle = 'rgba(0,0,0,0.55)';
   c.beginPath();
-  c.rect(0, 0, imgW, imgH);
+  c.rect(0, 0, env.imgW, env.imgH);
   c.rect(r.x, r.y, r.w, r.h);
   c.fill('evenodd');
   c.strokeStyle = 'rgba(255,255,255,0.35)';
@@ -926,65 +297,20 @@ function drawCropUI(c: CanvasRenderingContext2D) {
   c.restore();
 }
 
-function paintBackground(c: CanvasRenderingContext2D, W: number, H: number) {
-  const p = PRESETS.find((x) => x.id === doc.bg.preset) ?? PRESETS[0];
-  if (p.solid) c.fillStyle = p.solid;
-  else {
-    const g = c.createLinearGradient(0, 0, W, H);
-    p.stops!.forEach((s, i, all) => g.addColorStop(i / (all.length - 1), s));
-    c.fillStyle = g;
-  }
-  c.fillRect(0, 0, W, H);
-}
-
-function paint(c: CanvasRenderingContext2D, exporting: boolean) {
+function paint() {
   const v = view();
-  const W = Math.max(1, Math.round(v.base.w + v.pad * 2));
-  const H = Math.max(1, Math.round(v.base.h + v.pad * 2));
-  if (c.canvas.width !== W || c.canvas.height !== H) {
-    c.canvas.width = W;
-    c.canvas.height = H;
-    if (!exporting) layout();
+  if (canvas.width !== v.W || canvas.height !== v.H) {
+    canvas.width = v.W;
+    canvas.height = v.H;
+    layout();
   }
-  c.clearRect(0, 0, W, H);
-  if (v.bgOn) {
-    paintBackground(c, W, H);
-    if (doc.bg.shadow && v.pad > 0) {
-      c.save();
-      c.shadowColor = 'rgba(0,0,0,0.45)';
-      c.shadowBlur = 36 * unit;
-      c.shadowOffsetY = 12 * unit;
-      c.fillStyle = '#000';
-      c.beginPath();
-      c.roundRect(v.pad, v.pad, v.base.w, v.base.h, v.radius);
-      c.fill();
-      c.restore();
-    }
-  }
-  c.save();
-  c.beginPath();
-  c.roundRect(v.pad, v.pad, v.base.w, v.base.h, v.radius);
-  c.clip();
-  c.translate(v.pad - v.base.x, v.pad - v.base.y);
-  c.drawImage(img, 0, 0);
-  const list = doc.shapes.filter((s) => s.id !== editing?.shape.id);
-  if (action?.kind === 'draw' || action?.kind === 'highlight') list.push(action.shape);
-  // A callout keeps its bubble while its text is being typed.
-  if (editing?.shape.type === 'callout') list.push({ ...editing.shape, text: '' });
-  const spots = list.filter((s) => s.type === 'spotlight');
-  // Blur and pixelate redraw image pixels, so they go under the spotlight's dimming.
-  const under = spots.length ? list.filter((s) => s.type === 'blur' || s.type === 'pixelate') : [];
-  for (const s of under) drawShape(c, s);
-  paintSpotlights(c, spots);
-  for (const s of list) if (!under.includes(s)) drawShape(c, s);
-  c.restore();
-  if (!exporting) {
-    c.save();
-    c.translate(v.pad - v.base.x, v.pad - v.base.y);
-    drawSelection(c);
-    drawCropUI(c);
-    c.restore();
-  }
+  paintDoc(ctx, doc, v, shapesToDraw());
+  ctx.save();
+  ctx.translate(v.imgX - v.base.x, v.imgY - v.base.y);
+  drawSelection(ctx);
+  drawGuides(ctx, v);
+  drawCropUI(ctx);
+  ctx.restore();
 }
 
 let frame = 0;
@@ -992,73 +318,35 @@ function render() {
   if (!ready || frame) return;
   frame = requestAnimationFrame(() => {
     frame = 0;
-    paint(ctx, false);
+    paint();
   });
 }
+onRenderRequest(render);
 
 // ---------------------------------------------------------------------------------------------
-// Hit testing
+// Hit testing and snapping
 // ---------------------------------------------------------------------------------------------
-
-/** Hit test for a rectangle or ellipse: its whole area when filled, otherwise only its outline. */
-function hitBox(s: Shape, p: P, tol: number, ellipse: boolean, filled: boolean, stroke: number): boolean {
-  const r = norm(s);
-  if (!ellipse) {
-    const m = tol + stroke / 2;
-    if (!inRect(p, r, m)) return false;
-    if (filled) return true;
-    return !(p.x > r.x + m && p.x < r.x + r.w - m && p.y > r.y + m && p.y < r.y + r.h - m);
-  }
-  const rx = r.w / 2;
-  const ry = r.h / 2;
-  if (rx < 1 || ry < 1) return false;
-  const d = Math.hypot((p.x - r.x - rx) / rx, (p.y - r.y - ry) / ry);
-  const band = (tol + stroke / 2) / Math.min(rx, ry);
-  return filled ? d <= 1 + band : Math.abs(d - 1) <= band;
-}
-
-function hit(s: Shape, p: P, tol: number): boolean {
-  switch (s.type) {
-    case 'line':
-    case 'arrow':
-      return distToPath(p, linePoints(s)) <= s.width / 2 + tol;
-    case 'rect':
-      return hitBox(s, p, tol, false, !!s.filled, s.width);
-    case 'ellipse':
-      return hitBox(s, p, tol, true, !!s.filled, s.width);
-    // A spotlight is picked by its edge, so that clicks inside it reach the shapes it lights up.
-    case 'spotlight':
-      return hitBox(s, p, tol, s.style === 'ellipse', false, 4 * unit);
-    case 'blur':
-    case 'pixelate':
-    case 'redact':
-      return inRect(p, norm(s), tol);
-    case 'callout': {
-      if (inRect(p, calloutBox(s), tol)) return true;
-      const b = calloutBox(s);
-      return !!s.tip && distToSeg(p, { x: b.x + b.w / 2, y: b.y + b.h / 2 }, s.tip) <= tol + s.width * 0.3;
-    }
-    case 'highlighter':
-      return (s.rects ?? []).some((r) => inRect(p, r, tol));
-    case 'pen': {
-      const pts = s.points ?? [];
-      const lim = s.width / 2 + tol;
-      if (pts.length === 1) return Math.hypot(p.x - pts[0].x, p.y - pts[0].y) <= lim;
-      for (let i = 0; i < pts.length - 1; i++) if (distToSeg(p, pts[i], pts[i + 1]) <= lim) return true;
-      return false;
-    }
-    case 'text':
-      return inRect(p, s, tol);
-    case 'counter':
-      return Math.hypot(p.x - s.x, p.y - s.y) <= s.width + tol;
-  }
-}
 
 function shapeAt(p: P): Shape | null {
   const tol = 6 / viewScale();
   for (let i = doc.shapes.length - 1; i >= 0; i--) if (hit(doc.shapes[i], p, tol)) return doc.shapes[i];
   return null;
 }
+
+/** Index of the visible selection's handle under `p`, or -1. */
+function handleAt(p: P): number {
+  const s = visibleSelection();
+  if (!s) return -1;
+  return handles(s).findIndex((h) => Math.hypot(h.x - p.x, h.y - p.y) <= 8 / viewScale());
+}
+
+/** What shapes snap to: the other shapes and the image's edges and centre. */
+function snapTargets(exclude: number[]): Rect[] {
+  const b = view().base;
+  return [b, ...doc.shapes.filter((s) => !exclude.includes(s.id) && s.type !== 'pen').map(bbox)];
+}
+
+const snapTol = () => 6 / viewScale();
 
 // ---------------------------------------------------------------------------------------------
 // Undo / redo
@@ -1081,7 +369,7 @@ function restore(json: string) {
   doc.shapes = d.shapes;
   doc.crop = d.crop;
   doc.bg = d.bg;
-  selectedId = null;
+  sel = sel.filter((id) => byId(id));
   syncBgPanel();
   updateToolbar();
   render();
@@ -1108,18 +396,26 @@ function redo() {
 // Text editing
 // ---------------------------------------------------------------------------------------------
 
+const contrast = (hex: string) => (isLightColor(hex) ? '#1c1c1e' : '#ffffff');
+
+function isLightColor(hex: string): boolean {
+  const n = parseInt(hex.slice(1, 7), 16);
+  return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 170;
+}
+
 function positionTextInput() {
   if (!editing) return;
   const s = editing.shape;
   const k = viewScale();
   const p = toClient({ x: s.x, y: s.y });
   const st = stage.getBoundingClientRect();
-  textInput.style.left = `${p.x - st.left - 1}px`;
-  textInput.style.top = `${p.y - st.top - 1}px`;
+  textInput.style.left = `${p.x - st.left + stage.scrollLeft - 1}px`;
+  textInput.style.top = `${p.y - st.top + stage.scrollTop - 1}px`;
   textInput.style.fontSize = `${s.width * k}px`;
-  const callout = s.type === 'callout';
-  textInput.style.color = callout ? (isLight(s.color) ? '#1c1c1e' : '#ffffff') : s.color;
-  textInput.classList.toggle('callout', callout);
+  const boxed = hasTextBox(s);
+  textInput.style.color = boxed ? contrast(s.color) : s.color;
+  textInput.style.textAlign = s.align ?? 'left';
+  textInput.classList.toggle('boxed', boxed);
   autosizeText();
 }
 
@@ -1127,15 +423,12 @@ function autosizeText() {
   if (!editing) return;
   const s = editing.shape;
   const k = viewScale();
-  ctx.save();
-  ctx.font = font(s.width);
   const lines = textInput.value.split('\n');
-  const w = Math.max(...lines.map((l) => ctx.measureText(l).width), s.width) * k;
-  ctx.restore();
-  textInput.style.width = `${w + s.width * k * 0.8 + 4}px`;
-  textInput.style.height = `${lines.length * s.width * 1.25 * k + 2}px`;
-  if (s.type === 'callout') {
-    // Grow the bubble as the text is typed.
+  const w = Math.max(...lines.map((l) => textWidth(l, s.width)), s.width);
+  textInput.style.width = `${w * k + s.width * k * 0.8 + 4}px`;
+  textInput.style.height = `${lines.length * s.width * LINE_HEIGHT * k + 2}px`;
+  if (hasTextBox(s) || s.align === 'center' || s.align === 'right') {
+    // Grow the bubble (and keep alignment right) as the text is typed.
     measureText(s, textInput.value);
     render();
   }
@@ -1158,11 +451,11 @@ function commitText() {
   const { shape, isNew } = editing;
   editing = null;
   textInput.hidden = true;
-  const text = textInput.value.replace(/\s+$/, '');
-  if (!text) {
+  const value = textInput.value.replace(/\s+$/, '');
+  if (!value) {
     if (!isNew) doc.shapes = doc.shapes.filter((x) => x.id !== shape.id);
   } else {
-    shape.text = text;
+    shape.text = value;
     measureText(shape);
     if (isNew) doc.shapes.push(shape);
   }
@@ -1181,12 +474,25 @@ textInput.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Pointer interaction
+// Creating and editing shapes
 // ---------------------------------------------------------------------------------------------
 
 function newShape(type: ShapeType, p: P): Shape {
-  const s: Shape = { id: nextId++, type, color, width: sizeFor(type, sizeIdx), x: p.x, y: p.y, w: 0, h: 0 };
-  if (styles[type]) s.style = styles[type];
+  const s: Shape = {
+    id: nextId++,
+    type,
+    color: type === 'redact' ? REDACT_COLOR : color,
+    width: sizeFor(type, prefs.sizeIdx),
+    x: p.x,
+    y: p.y,
+    w: 0,
+    h: 0,
+  };
+  const style = option(type, 'style');
+  if (style) s.style = style;
+  const align = option(type, 'align');
+  if (align && align !== 'left') s.align = align;
+  if (prefs.opacity < 1 && type !== 'redact' && type !== 'blur' && type !== 'pixelate') s.opacity = prefs.opacity;
   return s;
 }
 
@@ -1197,20 +503,33 @@ function placeCallout(s: Shape, p: P) {
   s.y = p.y - s.h / 2;
 }
 
+const nextCounter = () => Math.max(0, ...doc.shapes.filter((s) => s.type === 'counter').map((s) => s.n ?? 0)) + 1;
+
+/** Numbers steps 1, 2, 3… in their current order, closing gaps left by deleted steps. */
+function renumberCounters() {
+  doc.shapes
+    .filter((s) => s.type === 'counter')
+    .sort((a, b) => (a.n ?? 0) - (b.n ?? 0))
+    .forEach((s, i) => (s.n = i + 1));
+}
+
 function applyHandle(s: Shape, orig: Shape, idx: number, p: P) {
-  if (s.type === 'callout') {
+  if (s.type === 'callout' || (s.type === 'magnifier' && idx === 4)) {
     s.tip = { ...p };
     return;
   }
-  if ((s.type === 'line' || s.type === 'arrow') && idx === 2) {
+  if (isLine(s.type) && idx === 2) {
     const mid = { x: orig.x + orig.w / 2, y: orig.y + orig.h / 2 };
     const bend = { x: (p.x - mid.x) * 2, y: (p.y - mid.y) * 2 };
     // Snap back to a straight line when the handle is dragged close to it.
-    const off = distToSeg(p, { x: orig.x, y: orig.y }, { x: orig.x + orig.w, y: orig.y + orig.h });
+    const a = { x: orig.x, y: orig.y };
+    const b = { x: orig.x + orig.w, y: orig.y + orig.h };
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const off = Math.abs((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x)) / len;
     s.bend = off * viewScale() < 6 ? undefined : bend;
     return;
   }
-  if (s.type === 'line' || s.type === 'arrow') {
+  if (isLine(s.type)) {
     if (idx === 0) {
       s.x = p.x;
       s.y = p.y;
@@ -1227,24 +546,117 @@ function applyHandle(s: Shape, orig: Shape, idx: number, p: P) {
   s.y = opp.y;
   s.w = p.x - opp.x;
   s.h = p.y - opp.y;
+  if (s.type === 'magnifier' || s.type === 'stamp') squareUp(s);
 }
 
-/** Where the current pointer press started, in client pixels. */
-let downClient: P = { x: 0, y: 0 };
+/** Makes a box square, keeping the corner at (x, y) and the drag direction. */
+function squareUp(s: Shape) {
+  const m = Math.max(Math.abs(s.w), Math.abs(s.h));
+  s.w = Math.sign(s.w || 1) * m;
+  s.h = Math.sign(s.h || 1) * m;
+}
 
 function normalizeBox(s: Shape) {
   if (isBox(s.type)) Object.assign(s, norm(s));
 }
 
-/** Index of the visible selection's handle under `p`, or -1. */
-function handleAt(p: P): number {
-  const sel = visibleSelection();
-  if (!sel) return -1;
-  return handles(sel).findIndex((h) => Math.hypot(h.x - p.x, h.y - p.y) <= 8 / viewScale());
+function deleteSelected() {
+  if (!sel.length) return;
+  const hadCounter = selectedShapes().some((s) => s.type === 'counter');
+  doc.shapes = doc.shapes.filter((s) => !sel.includes(s.id));
+  sel = [];
+  if (hadCounter) renumberCounters();
+  commit();
+  render();
+}
+
+/** Adds copies of `shapes`, offset by `d`, and selects them. */
+function addCopies(shapes: Shape[], d: number) {
+  if (!shapes.length) return;
+  if (tool !== 'select') setTool('select');
+  const ids: number[] = [];
+  let n = nextCounter();
+  for (const s of shapes) {
+    const c = clone(s);
+    c.id = nextId++;
+    translate(c, s, d, d);
+    if (c.type === 'counter') c.n = n++;
+    doc.shapes.push(c);
+    ids.push(c.id);
+  }
+  sel = ids;
+  commit();
+  render();
+}
+
+function copyShapes(cut: boolean) {
+  const shapes = selectedShapes();
+  if (!shapes.length) return;
+  writeShapeClipboard(JSON.stringify(shapes));
+  pasteCount = 0;
+  if (cut) deleteSelected();
+  else toast(`Copied ${shapes.length} shape${shapes.length === 1 ? '' : 's'}`);
+}
+
+function pasteShapes(): boolean {
+  let shapes: Shape[];
+  try {
+    shapes = JSON.parse(readShapeClipboard() ?? '[]');
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(shapes) || !shapes.length) return false;
+  pasteCount++;
+  addCopies(shapes, 12 * env.unit * pasteCount);
+  return true;
+}
+
+type Arrange = 'front' | 'forward' | 'backward' | 'back';
+
+function arrange(how: Arrange) {
+  if (!sel.length) return;
+  const on = (s: Shape) => sel.includes(s.id);
+  const a = doc.shapes;
+  if (how === 'front') doc.shapes = [...a.filter((s) => !on(s)), ...a.filter(on)];
+  else if (how === 'back') doc.shapes = [...a.filter(on), ...a.filter((s) => !on(s))];
+  else if (how === 'forward') {
+    for (let i = a.length - 2; i >= 0; i--) if (on(a[i]) && !on(a[i + 1])) [a[i], a[i + 1]] = [a[i + 1], a[i]];
+  } else {
+    for (let i = 1; i < a.length; i++) if (on(a[i]) && !on(a[i - 1])) [a[i], a[i - 1]] = [a[i - 1], a[i]];
+  }
+  commit();
+  render();
+}
+
+function nudge(dx: number, dy: number) {
+  const shapes = targets();
+  if (!shapes.length) return;
+  for (const s of shapes) translate(s, clone(s), dx, dy);
+  commit();
+  render();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pointer interaction
+// ---------------------------------------------------------------------------------------------
+
+function cursorFor(t: Tool) {
+  if (spaceDown) return 'grab';
+  return t === 'select' ? 'default' : t === 'text' ? 'text' : 'crosshair';
 }
 
 canvas.addEventListener('pointerdown', (e) => {
-  if (!ready || e.button !== 0) return;
+  if (!ready) return;
+  hideMenu();
+  // Middle button, or Space + drag: pan.
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    action = { kind: 'pan', x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+    canvas.style.cursor = 'grabbing';
+    return;
+  }
+  if (e.button !== 0) return;
   if (editing) {
     commitText();
     return;
@@ -1263,16 +675,23 @@ canvas.addEventListener('pointerdown', (e) => {
   // Handles of the selection work in the select tool and right after drawing a shape.
   const hi = handleAt(p);
   if (hi >= 0) {
-    action = { kind: 'handle', idx: hi, orig: clone(selected()!) };
+    action = { kind: 'handle', idx: hi, orig: clone(single()!) };
     return;
   }
 
   if (tool === 'select') {
     const s = shapeAt(p);
-    selectedId = s?.id ?? null;
-    if (s) {
-      color = s.color;
-      action = { kind: 'move', start: p, orig: clone(s) };
+    if (s && e.shiftKey) {
+      sel = sel.includes(s.id) ? sel.filter((id) => id !== s.id) : [...sel, s.id];
+    } else if (s) {
+      if (!sel.includes(s.id)) sel = [s.id];
+      if (sel.length === 1) color = s.color;
+      action = { kind: 'move', start: p, origs: selectedShapes().map(clone), moved: false };
+    } else {
+      // Drag on empty space: select everything the box touches (Shift adds to the selection).
+      const base = e.shiftKey ? sel : [];
+      sel = base;
+      action = { kind: 'marquee', start: p, end: p, base };
     }
     updateToolbar();
     render();
@@ -1282,7 +701,7 @@ canvas.addEventListener('pointerdown', (e) => {
   if (tool === 'text' || tool === 'callout') {
     const s = shapeAt(p);
     if (s?.type === tool) {
-      selectedId = null;
+      sel = [];
       openText(s, false);
       return;
     }
@@ -1294,8 +713,7 @@ canvas.addEventListener('pointerdown', (e) => {
   }
 
   if (tool === 'counter') {
-    const n = Math.max(0, ...doc.shapes.filter((s) => s.type === 'counter').map((s) => s.n ?? 0)) + 1;
-    doc.shapes.push({ ...newShape('counter', p), n });
+    doc.shapes.push({ ...newShape('counter', p), n: nextCounter() });
     commit();
     render();
     return;
@@ -1303,23 +721,23 @@ canvas.addEventListener('pointerdown', (e) => {
 
   if (tool === 'highlighter') {
     const a: Action = { kind: 'highlight', shape: newShape('highlighter', p), start: p, caret: caretAt(p, true) };
-    selectedId = null;
+    sel = [];
     updateHighlight(a, p);
     action = a;
     render();
     return;
   }
 
-  const shape = newShape(tool as ShapeType, p);
+  const shape = newShape(tool, p);
   if (tool === 'pen') shape.points = [p];
-  if (tool === 'rect' || tool === 'ellipse') shape.filled = filled;
+  if (tool === 'rect' || tool === 'ellipse') shape.filled = prefs.filled;
   if (tool === 'callout') {
     // Drag from the point of interest to where the bubble goes.
     shape.text = '';
     shape.tip = { ...p };
     placeCallout(shape, p);
   }
-  selectedId = null;
+  sel = [];
   action = { kind: 'draw', shape, start: p };
   render();
 });
@@ -1327,19 +745,28 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('dblclick', (e) => {
   if (!ready || tool !== 'select') return;
   const s = shapeAt(toImg(e));
-  if (s?.type === 'text' || s?.type === 'callout') openText(s, false);
+  if (s && hasText(s.type)) openText(s, false);
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (!ready) return;
+  if (action?.kind === 'pan') {
+    stage.scrollLeft = action.left - (e.clientX - action.x);
+    stage.scrollTop = action.top - (e.clientY - action.y);
+    return;
+  }
   const p = toImg(e);
   if (!action) {
     const onHandle = handleAt(p) >= 0;
-    if (tool === 'select') canvas.style.cursor = onHandle ? 'crosshair' : shapeAt(p) ? 'move' : 'default';
+    if (spaceDown) canvas.style.cursor = 'grab';
+    else if (tool === 'select') canvas.style.cursor = onHandle ? 'crosshair' : shapeAt(p) ? 'move' : 'default';
     else if (tool !== 'crop' && tool !== 'text') canvas.style.cursor = onHandle ? 'grab' : cursorFor(tool);
     return;
   }
   const shift = e.shiftKey || shiftDown;
+  // Hold Alt to place things freely, without snapping.
+  const snap = !e.altKey;
+  guides = {};
 
   switch (action.kind) {
     case 'draw': {
@@ -1349,22 +776,18 @@ canvas.addEventListener('pointermove', (e) => {
         const last = s.points![s.points!.length - 1];
         if (Math.hypot(p.x - last.x, p.y - last.y) * viewScale() >= 2) s.points!.push(p);
       } else {
-        let w = p.x - action.start.x;
-        let h = p.y - action.start.y;
-        if (shift) {
-          if (s.type === 'line' || s.type === 'arrow') {
-            const ang = Math.round(Math.atan2(h, w) / (Math.PI / 4)) * (Math.PI / 4);
-            const len = Math.hypot(w, h);
-            w = Math.cos(ang) * len;
-            h = Math.sin(ang) * len;
-          } else {
-            const m = Math.max(Math.abs(w), Math.abs(h));
-            w = Math.sign(w || 1) * m;
-            h = Math.sign(h || 1) * m;
-          }
+        let end = p;
+        if (isLine(s.type) && shift) {
+          const v = snapAngle(p.x - action.start.x, p.y - action.start.y);
+          end = { x: action.start.x + v.x, y: action.start.y + v.y };
+        } else if (snap) {
+          const r = snapPoint(p, snapTargets([s.id]), snapTol());
+          end = r.p;
+          guides = r.guides;
         }
-        s.w = w;
-        s.h = h;
+        s.w = end.x - action.start.x;
+        s.h = end.y - action.start.y;
+        if (!isLine(s.type) && (shift || s.type === 'magnifier' || s.type === 'stamp')) squareUp(s);
       }
       break;
     }
@@ -1372,27 +795,59 @@ canvas.addEventListener('pointermove', (e) => {
       updateHighlight(action, p);
       break;
     case 'move': {
-      const s = selected();
-      if (!s) break;
-      const dx = p.x - action.start.x;
-      const dy = p.y - action.start.y;
-      s.x = action.orig.x + dx;
-      s.y = action.orig.y + dy;
-      if (action.orig.points) s.points = action.orig.points.map((q) => ({ x: q.x + dx, y: q.y + dy }));
-      if (action.orig.tip) s.tip = { x: action.orig.tip.x + dx, y: action.orig.tip.y + dy };
-      if (action.orig.rects) s.rects = action.orig.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
+      let dx = p.x - action.start.x;
+      let dy = p.y - action.start.y;
+      if (!action.moved && Math.hypot(dx, dy) * viewScale() < 2) break;
+      action.moved = true;
+      if (shift) {
+        // Shift keeps the move horizontal or vertical.
+        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
+      if (snap) {
+        const box = union(action.origs.map(bbox));
+        const r = snapBox({ ...box, x: box.x + dx, y: box.y + dy }, snapTargets(sel), snapTol());
+        dx += r.dx;
+        dy += r.dy;
+        guides = r.guides;
+      }
+      for (const o of action.origs) {
+        const s = byId(o.id);
+        if (s) translate(s, o, dx, dy);
+      }
       break;
     }
     case 'handle': {
-      const s = selected();
-      if (s) applyHandle(s, action.orig, action.idx, p);
+      const s = single();
+      if (!s) break;
+      let q = p;
+      const curveHandle = (isLine(s.type) && action.idx === 2) || s.type === 'callout';
+      if (isLine(s.type) && !curveHandle && shift) {
+        // Keep the other end fixed and snap the angle.
+        const o = action.orig;
+        const fixed = action.idx === 0 ? { x: o.x + o.w, y: o.y + o.h } : { x: o.x, y: o.y };
+        const v = snapAngle(p.x - fixed.x, p.y - fixed.y);
+        q = { x: fixed.x + v.x, y: fixed.y + v.y };
+      } else if (snap && !curveHandle) {
+        const r = snapPoint(p, snapTargets([s.id]), snapTol());
+        q = r.p;
+        guides = r.guides;
+      }
+      applyHandle(s, action.orig, action.idx, q);
+      break;
+    }
+    case 'marquee': {
+      action.end = p;
+      const r = norm({ x: action.start.x, y: action.start.y, w: p.x - action.start.x, h: p.y - action.start.y });
+      const inside = doc.shapes.filter((s) => intersects(bbox(s), r)).map((s) => s.id);
+      sel = [...new Set([...action.base, ...inside])];
       break;
     }
     case 'crop': {
-      const x1 = clamp(action.start.x, 0, imgW);
-      const y1 = clamp(action.start.y, 0, imgH);
-      const x2 = clamp(p.x, 0, imgW);
-      const y2 = clamp(p.y, 0, imgH);
+      const x1 = clamp(action.start.x, 0, env.imgW);
+      const y1 = clamp(action.start.y, 0, env.imgH);
+      const x2 = clamp(p.x, 0, env.imgW);
+      const y2 = clamp(p.y, 0, env.imgH);
       pendingCrop = norm({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
       updateCropBar();
       break;
@@ -1405,27 +860,39 @@ canvas.addEventListener('pointerup', (e) => {
   if (!action) return;
   const a = action;
   action = null;
+  guides = {};
   const minSize = 3 / viewScale();
+  const clicked = Math.hypot(e.clientX - downClient.x, e.clientY - downClient.y) < 5;
   switch (a.kind) {
+    case 'pan':
+      canvas.style.cursor = cursorFor(tool);
+      return;
     case 'draw': {
       const s = a.shape;
       if (s.type === 'callout') {
         // A click (no drag) puts the bubble up and to the right of the point.
         const tip = s.tip!;
-        if (Math.hypot(e.clientX - downClient.x, e.clientY - downClient.y) < 8) {
-          placeCallout(s, { x: tip.x + s.width * 5, y: tip.y - s.width * 3.5 });
-        }
+        if (clicked) placeCallout(s, { x: tip.x + s.width * 5, y: tip.y - s.width * 3.5 });
         openText(s, true);
         return;
       }
-      const big = s.type === 'pen' ? true : Math.abs(s.w) >= minSize || Math.abs(s.h) >= minSize;
+      if ((s.type === 'stamp' || s.type === 'magnifier') && clicked) {
+        // A click places one at the default size.
+        const d = s.type === 'magnifier' ? s.width * 2 : s.width;
+        Object.assign(s, { x: a.start.x - d / 2, y: a.start.y - d / 2, w: d, h: d });
+      }
+      if (s.type === 'magnifier') {
+        normalizeBox(s);
+        s.tip = { x: s.x + s.w / 2, y: s.y + s.h / 2 };
+      }
+      const big = s.type === 'pen' || Math.abs(s.w) >= minSize || Math.abs(s.h) >= minSize;
       if (big) {
         normalizeBox(s);
         doc.shapes.push(s);
         // Keep the new shape selected so that its handles (e.g. an arrow's curve) are right there.
-        if (s.type === 'line' || s.type === 'arrow' || isBox(s.type)) selectedId = s.id;
+        // Not stamps: picking the next stamp would otherwise change the one just placed.
+        if (isLine(s.type) || (isBox(s.type) && s.type !== 'stamp')) sel = [s.id];
         commit();
-        updateToolbar();
       }
       break;
     }
@@ -1441,27 +908,116 @@ canvas.addEventListener('pointerup', (e) => {
       break;
     }
     case 'move':
+      if (a.moved) commit();
+      break;
     case 'handle': {
-      const s = selected();
+      const s = single();
       if (s) normalizeBox(s);
       commit();
       break;
     }
+    case 'marquee':
+      break;
     case 'crop':
       if (pendingCrop && (pendingCrop.w < 4 || pendingCrop.h < 4)) pendingCrop = null;
       updateCropBar();
       break;
   }
+  updateToolbar();
   render();
 });
 
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (!ready || editing) return;
+  const s = shapeAt(toImg(e));
+  if (!s) {
+    hideMenu();
+    return;
+  }
+  if (!sel.includes(s.id)) {
+    if (tool !== 'select') setTool('select');
+    sel = [s.id];
+  } else if (tool !== 'select') setTool('select');
+  updateToolbar();
+  render();
+  showMenu(e.clientX, e.clientY);
+});
+
+stage.addEventListener(
+  'wheel',
+  (e) => {
+    if (!ready || !e.ctrlKey) return;
+    // Ctrl + wheel (and touchpad pinch) zooms around the pointer.
+    e.preventDefault();
+    setZoom(currentZoom() * Math.exp(-e.deltaY * 0.0015), { x: e.clientX, y: e.clientY });
+  },
+  { passive: false },
+);
+
+function updateHighlight(a: Extract<Action, { kind: 'highlight' }>, p: P) {
+  if (a.caret) {
+    const end = caretAt(p, false);
+    a.shape.rects = end ? highlightRects(a.caret, end) : [];
+  } else {
+    // No text under the starting point: a straight horizontal bar that follows the drag.
+    const h = a.shape.width;
+    a.shape.rects = [{ x: Math.min(a.start.x, p.x), y: a.start.y - h / 2, w: Math.abs(p.x - a.start.x), h }];
+  }
+  if (a.shape.rects.length) a.shape.dark = isDarkArea(union(a.shape.rects));
+}
+
 // ---------------------------------------------------------------------------------------------
-// Tools, toolbar, crop and background controls
+// Context menu
 // ---------------------------------------------------------------------------------------------
 
-function cursorFor(t: Tool) {
-  return t === 'select' ? 'default' : t === 'text' ? 'text' : 'crosshair';
+const MENU: ([string, string, () => void] | null)[] = [
+  ['Duplicate', 'Ctrl+D', () => addCopies(selectedShapes(), 12 * env.unit)],
+  ['Copy', 'Ctrl+C', () => copyShapes(false)],
+  ['Cut', 'Ctrl+X', () => copyShapes(true)],
+  null,
+  ['Bring to front', 'Ctrl+]', () => arrange('front')],
+  ['Bring forward', ']', () => arrange('forward')],
+  ['Send backward', '[', () => arrange('backward')],
+  ['Send to back', 'Ctrl+[', () => arrange('back')],
+  null,
+  ['Delete', 'Del', deleteSelected],
+];
+
+function buildMenu() {
+  for (const item of MENU) {
+    if (!item) {
+      menu.appendChild(Object.assign(document.createElement('div'), { className: 'msep' }));
+      continue;
+    }
+    const [label, key, run] = item;
+    const b = document.createElement('button');
+    b.innerHTML = `<span>${label}</span><kbd>${key}</kbd>`;
+    b.addEventListener('click', () => {
+      hideMenu();
+      run();
+    });
+    menu.appendChild(b);
+  }
 }
+
+function showMenu(x: number, y: number) {
+  const wr = stageWrap.getBoundingClientRect();
+  menu.hidden = false;
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  menu.style.left = `${Math.min(x - wr.left, wr.width - mw - 8)}px`;
+  menu.style.top = `${Math.min(y - wr.top, wr.height - mh - 8)}px`;
+}
+
+const hideMenu = () => (menu.hidden = true);
+window.addEventListener('pointerdown', (e) => {
+  if (!menu.hidden && !menu.contains(e.target as Node)) hideMenu();
+});
+
+// ---------------------------------------------------------------------------------------------
+// Tools and toolbar
+// ---------------------------------------------------------------------------------------------
 
 function setTool(t: Tool) {
   if (editing) commitText();
@@ -1473,17 +1029,18 @@ function setTool(t: Tool) {
     pendingCrop = null;
   }
   if (t === 'highlighter') {
-    drawColor = color;
-    color = highlighterColor;
-    if (textDetection === 'pending') toast('Detecting text… highlights will snap to text in a moment');
-    else if (textDetection === 'done' && !textLines.length) toast('No text found — the highlighter will draw straight bars');
+    prefs.color = color;
+    color = prefs.highlighterColor;
+    if (ocr.status === 'pending') toast('Detecting text… highlights will snap to text in a moment');
+    else if (ocr.status === 'done' && !ocr.lines.length) toast('No text found — the highlighter will draw straight bars');
   } else if (tool === 'highlighter') {
-    highlighterColor = color;
-    color = drawColor;
+    prefs.highlighterColor = color;
+    color = prefs.color;
   }
   tool = t;
-  if (t !== 'select') selectedId = null;
+  if (t !== 'select') sel = [];
   canvas.style.cursor = cursorFor(t);
+  savePrefsSoon();
   updateToolbar();
   updateCropBar();
   render();
@@ -1509,58 +1066,144 @@ function applyCrop() {
   setTool(prevTool);
 }
 
-function applyToSelected(fn: (s: Shape) => void) {
-  const s = visibleSelection();
-  if (!s) return;
-  fn(s);
-  if (s.type === 'text' || s.type === 'callout') measureText(s);
-  commit();
+function applyToSelected(fn: (s: Shape) => void, save = true) {
+  const shapes = targets();
+  if (!shapes.length) return;
+  for (const s of shapes) {
+    fn(s);
+    if (hasText(s.type)) measureText(s);
+  }
+  if (save) commit();
   render();
 }
 
-/** The shape type whose styles the toolbar offers: the selection's, else the current tool's. */
-function styleTarget(): ShapeType | null {
-  const s = visibleSelection();
-  if (s) return STYLES[s.type] ? s.type : null;
-  return tool !== 'select' && tool !== 'crop' && STYLES[tool] ? tool : null;
-}
-
-function setStyle(type: ShapeType, id: string) {
-  styles[type] = id;
-  applyToSelected((s) => {
-    if (s.type === type) s.style = id;
-  });
+function setColor(c: string) {
+  color = c;
+  applyToSelected((s) => (s.color = c));
+  savePrefsSoon();
   updateToolbar();
 }
 
-function cycleStyle() {
-  const type = styleTarget();
-  if (!type) return;
-  const list = STYLES[type]!;
-  const cur = visibleSelection()?.style ?? styles[type];
-  setStyle(type, list[(list.findIndex((x) => x.id === cur) + 1) % list.length].id);
+function addCustomColor(c: string) {
+  prefs.customColors = [c, ...prefs.customColors.filter((x) => x !== c)].slice(0, 3);
+  buildSwatches();
+  setColor(c);
 }
 
 function setSize(i: number) {
-  sizeIdx = i;
-  applyToSelected((s) => (s.width = sizeFor(s.type, i)));
+  prefs.sizeIdx = i;
+  applyToSelected((s) => {
+    if (s.type === 'redact' || s.type === 'blur' || s.type === 'pixelate' || s.type === 'spotlight') return;
+    if (s.type === 'stamp' || s.type === 'magnifier') {
+      // Resize around the centre.
+      const d = s.type === 'magnifier' ? sizeFor(s.type, i) * 2 : sizeFor(s.type, i);
+      const r = norm(s);
+      Object.assign(s, { x: r.x + r.w / 2 - d / 2, y: r.y + r.h / 2 - d / 2, w: d, h: d, width: sizeFor(s.type, i) });
+      return;
+    }
+    s.width = sizeFor(s.type, i);
+  });
+  savePrefsSoon();
   updateToolbar();
 }
 
 function toggleFill() {
-  filled = !filled;
+  prefs.filled = !prefs.filled;
   applyToSelected((s) => {
-    if (s.type === 'rect' || s.type === 'ellipse') s.filled = filled;
+    if (s.type === 'rect' || s.type === 'ellipse') s.filled = prefs.filled;
   });
+  savePrefsSoon();
   updateToolbar();
 }
 
-function deleteSelected() {
-  if (selectedId === null) return;
-  doc.shapes = doc.shapes.filter((s) => s.id !== selectedId);
-  selectedId = null;
-  commit();
-  render();
+/** The shape type whose options the toolbar offers: the selection's, else the current tool's. */
+function optionTarget(): ShapeType | null {
+  const shapes = targets();
+  if (shapes.length) {
+    const t = shapes[0].type;
+    return OPTIONS[t] && shapes.every((s) => s.type === t) ? t : null;
+  }
+  return tool !== 'select' && tool !== 'crop' && OPTIONS[tool] ? tool : null;
+}
+
+function currentOption(type: ShapeType, key: 'style' | 'align'): string | undefined {
+  const s = targets().find((x) => x.type === type);
+  if (s) return (key === 'align' ? s.align ?? 'left' : s.style) ?? option(type, key);
+  return option(type, key);
+}
+
+function setOption(type: ShapeType, key: 'style' | 'align', id: string) {
+  (prefs.options[type] ??= {})[key] = id;
+  applyToSelected((s) => {
+    if (s.type !== type) return;
+    if (key === 'align') s.align = id === 'left' ? undefined : id;
+    else {
+      s.style = id;
+      // Elbow arrows route themselves.
+      if (isLine(s.type) && id === 'elbow') s.bend = undefined;
+    }
+  });
+  savePrefsSoon();
+  updateToolbar();
+}
+
+/** Steps through the first option group of the current tool or selection. */
+function cycleStyle() {
+  const type = optionTarget();
+  const group = type && OPTIONS[type]?.[0];
+  if (!type || !group) return;
+  const cur = currentOption(type, group.key);
+  setOption(type, group.key, group.items[(group.items.findIndex((x) => x.id === cur) + 1) % group.items.length].id);
+}
+
+function setOpacity(v: number, save: boolean) {
+  prefs.opacity = clamp(v, 0.1, 1);
+  applyToSelected((s) => {
+    if (s.type === 'redact' || s.type === 'blur' || s.type === 'pixelate') return;
+    s.opacity = prefs.opacity < 1 ? prefs.opacity : undefined;
+  }, save);
+  if (save) savePrefsSoon();
+  ($('opacity') as HTMLInputElement).value = String(Math.round(prefs.opacity * 100));
+  $('opacityValue').textContent = `${Math.round(prefs.opacity * 100)}%`;
+}
+
+function buildSwatches() {
+  const box = $('colors');
+  box.innerHTML = '';
+  for (const c of [...COLORS, ...prefs.customColors.filter((x) => !COLORS.includes(x))]) {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.dataset.color = c;
+    b.style.background = c;
+    b.title = c;
+    b.addEventListener('click', () => setColor(c));
+    box.appendChild(b);
+  }
+  const custom = document.createElement('label');
+  custom.className = 'tool mini';
+  custom.title = 'Custom colour';
+  custom.innerHTML = `${svg('plus')}<input type="color" id="colorInput">`;
+  const input = custom.querySelector('input')!;
+  input.addEventListener('change', () => addCustomColor(input.value));
+  box.appendChild(custom);
+  if ('EyeDropper' in window) {
+    const b = document.createElement('button');
+    b.className = 'tool mini';
+    b.title = 'Pick a colour from the screen (I)';
+    b.innerHTML = svg('eyedropper');
+    b.addEventListener('click', pickColor);
+    box.appendChild(b);
+  }
+  updateToolbar();
+}
+
+async function pickColor() {
+  try {
+    const r = await new (window as any).EyeDropper().open();
+    if (r?.sRGBHex) addCustomColor(r.sRGBHex);
+  } catch {
+    // Cancelled with Esc.
+  }
 }
 
 function buildToolbar() {
@@ -1574,29 +1217,15 @@ function buildToolbar() {
     b.addEventListener('click', () => setTool(t.id));
     tools.appendChild(b);
   }
-
-  const colors = $('colors');
-  for (const c of COLORS) {
-    const b = document.createElement('button');
-    b.className = 'swatch';
-    b.dataset.color = c;
-    b.style.background = c;
-    b.title = c;
-    b.addEventListener('click', () => {
-      color = c;
-      applyToSelected((s) => (s.color = c));
-      updateToolbar();
-    });
-    colors.appendChild(b);
-  }
+  buildSwatches();
 
   const sizes = $('sizes');
-  ['Small', 'Medium', 'Large'].forEach((label, i) => {
+  SIZE_LABELS.forEach((label, i) => {
     const b = document.createElement('button');
     b.className = 'tool size';
     b.dataset.size = String(i);
     b.title = `${label} (${i + 1})`;
-    const d = 4 + i * 4;
+    const d = 4 + i * 3;
     b.innerHTML = `<span style="width:${d}px;height:${d}px"></span>`;
     b.addEventListener('click', () => setSize(i));
     sizes.appendChild(b);
@@ -1604,12 +1233,16 @@ function buildToolbar() {
 
   $('fill').innerHTML = svg('fill');
   $('fill').addEventListener('click', toggleFill);
-  $('redact').innerHTML = `${svg('redact')}<span>Redact</span>`;
-  $('redact').addEventListener('click', autoRedact);
+  $('opacityIcon').innerHTML = svg('opacity');
+  const op = $<HTMLInputElement>('opacity');
+  op.addEventListener('input', () => setOpacity(Number(op.value) / 100, false));
+  op.addEventListener('change', () => setOpacity(Number(op.value) / 100, true));
   $('undo').innerHTML = svg('undo');
   $('undo').addEventListener('click', undo);
   $('redo').innerHTML = svg('redo');
   $('redo').addEventListener('click', redo);
+  $('redact').innerHTML = `${svg('redact')}<span>Redact</span>`;
+  $('redact').addEventListener('click', autoRedact);
   $('bgToggle').innerHTML = `${svg('background')}<span>Background</span>`;
   $('bgToggle').addEventListener('click', toggleBgPanel);
 
@@ -1624,6 +1257,8 @@ function buildToolbar() {
     updateCropBar();
     render();
   });
+  zoomLabel.addEventListener('click', () => setZoom(zoom === null ? 1 : null));
+  buildMenu();
 }
 
 function updateToolbar() {
@@ -1634,93 +1269,192 @@ function updateToolbar() {
     b.classList.toggle('active', b.dataset.color === color);
   }
   for (const b of Array.from(document.querySelectorAll<HTMLElement>('[data-size]'))) {
-    b.classList.toggle('active', b.dataset.size === String(sizeIdx));
+    b.classList.toggle('active', b.dataset.size === String(prefs.sizeIdx));
   }
-  $('fill').classList.toggle('active', filled);
-  updateStyles();
+  $('fill').classList.toggle('active', prefs.filled);
+  updateOptions();
   ($('undo') as HTMLButtonElement).disabled = !undoStack.length;
   ($('redo') as HTMLButtonElement).disabled = !redoStack.length;
   $('bgToggle').classList.toggle('active', !bgPanel.hidden);
 }
 
-/** Shows the style picker for the current tool or selection (arrow and spotlight styles). */
-function updateStyles() {
+/** Shows the option buttons (styles, alignment) for the current tool or selection. */
+function updateOptions() {
   const box = $('styles');
-  const type = styleTarget();
+  const type = optionTarget();
   box.hidden = $('stylesSep').hidden = !type;
   if (!type) return;
   if (box.dataset.type !== type) {
     box.dataset.type = type;
     box.innerHTML = '';
-    for (const st of STYLES[type]!) {
-      const b = document.createElement('button');
-      b.className = 'tool';
-      b.dataset.style = st.id;
-      b.title = `${st.label} (press ${TOOLS.find((t) => t.id === type)!.key.toUpperCase()} again for the next style)`;
-      b.innerHTML = svg(st.icon);
-      b.addEventListener('click', () => setStyle(type, st.id));
-      box.appendChild(b);
+    const key = TOOLS.find((t) => t.id === type)?.key.toUpperCase();
+    OPTIONS[type]!.forEach((group, gi) => {
+      if (gi) box.appendChild(Object.assign(document.createElement('div'), { className: 'sep small' }));
+      for (const o of group.items) {
+        const b = document.createElement('button');
+        b.className = `tool${o.text ? ' textopt' : ''}`;
+        b.dataset.group = group.key;
+        b.dataset.opt = o.id;
+        b.title = gi === 0 && key ? `${o.label} (press ${key} again for the next one)` : o.label;
+        b.innerHTML = o.icon ? svg(o.icon) : `<span>${o.text}</span>`;
+        b.addEventListener('click', () => setOption(type, group.key, o.id));
+        box.appendChild(b);
+      }
+    });
+  }
+  for (const group of OPTIONS[type]!) {
+    const cur = currentOption(type, group.key);
+    for (const b of Array.from(box.querySelectorAll<HTMLElement>(`[data-group="${group.key}"]`))) {
+      b.classList.toggle('active', b.dataset.opt === cur);
     }
   }
-  const cur = visibleSelection()?.style ?? styles[type];
-  for (const b of Array.from(box.querySelectorAll<HTMLElement>('[data-style]'))) {
-    b.classList.toggle('active', b.dataset.style === cur);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Background panel
+// ---------------------------------------------------------------------------------------------
+
+function bgChanged(save = true) {
+  if (!doc.bg.enabled) {
+    doc.bg.enabled = true;
+    $<HTMLInputElement>('bgEnabled').checked = true;
   }
+  if (save) commit();
+  syncBgPanel();
+  render();
+}
+
+/** Reads a picture and shrinks it to a reasonable size for a background. */
+async function loadBackgroundImage(file: File): Promise<string> {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(bmp.width * k);
+  cv.height = Math.round(bmp.height * k);
+  cv.getContext('2d')!.drawImage(bmp, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/jpeg', 0.9);
 }
 
 function buildBgPanel() {
   const sw = $('bgSwatches');
-  for (const p of PRESETS) {
+  const swatch = (id: string, style: string, title: string) => {
     const b = document.createElement('button');
     b.className = 'bgswatch';
-    b.dataset.preset = p.id;
-    b.style.background = p.solid ?? `linear-gradient(135deg, ${p.stops!.join(', ')})`;
-    b.addEventListener('click', () => {
-      doc.bg.preset = p.id;
-      doc.bg.enabled = true;
-      commit();
-      syncBgPanel();
-      render();
-    });
+    b.dataset.preset = id;
+    b.title = title;
+    b.style.background = style;
     sw.appendChild(b);
+    return b;
+  };
+  for (const p of PRESETS) {
+    swatch(p.id, p.solid ?? `linear-gradient(135deg, ${p.stops!.join(', ')})`, p.id).addEventListener('click', () => {
+      doc.bg.preset = p.id;
+      bgChanged();
+    });
   }
+  swatch('blurred', 'linear-gradient(135deg,#555,#999)', 'Blurred screenshot').addEventListener('click', () => {
+    doc.bg.preset = 'blurred';
+    bgChanged();
+  });
+  sw.querySelector('[data-preset="blurred"]')!.innerHTML = svg('blur');
+
+  const colorInput = $<HTMLInputElement>('bgColor');
+  const customBtn = swatch('custom', 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)', 'Custom colour');
+  customBtn.addEventListener('click', () => colorInput.click());
+  colorInput.addEventListener('input', () => {
+    doc.bg.preset = 'custom';
+    doc.bg.color = colorInput.value;
+    bgChanged(false);
+  });
+  colorInput.addEventListener('change', () => commit());
+
+  const fileInput = $<HTMLInputElement>('bgFile');
+  const imageBtn = swatch('image', '#2c2c31', 'Your own picture');
+  imageBtn.innerHTML = svg('image');
+  imageBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files?.[0];
+    fileInput.value = '';
+    if (!f) return;
+    try {
+      doc.bg.image = await loadBackgroundImage(f);
+      doc.bg.preset = 'image';
+      bgChanged();
+    } catch {
+      toast('Could not read that picture');
+    }
+  });
+
   const enabled = $<HTMLInputElement>('bgEnabled');
-  const padding = $<HTMLInputElement>('bgPadding');
-  const radius = $<HTMLInputElement>('bgRadius');
-  const shadow = $<HTMLInputElement>('bgShadow');
   enabled.addEventListener('change', () => {
     doc.bg.enabled = enabled.checked;
     commit();
     render();
   });
+  const shadow = $<HTMLInputElement>('bgShadow');
   shadow.addEventListener('change', () => {
     doc.bg.shadow = shadow.checked;
     commit();
     render();
   });
-  for (const [el, key] of [
-    [padding, 'padding'],
-    [radius, 'radius'],
+  for (const [id, key] of [
+    ['bgPadding', 'padding'],
+    ['bgRadius', 'radius'],
   ] as const) {
+    const el = $<HTMLInputElement>(id);
     el.addEventListener('input', () => {
       doc.bg[key] = Number(el.value);
-      if (!doc.bg.enabled) {
-        doc.bg.enabled = true;
-        enabled.checked = true;
-      }
-      render();
+      bgChanged(false);
     });
     el.addEventListener('change', commit);
   }
+
+  const aspect = $<HTMLSelectElement>('bgAspect');
+  aspect.innerHTML = ASPECTS.map((a) => `<option value="${a}">${a === 'auto' ? 'Fit the screenshot' : a}</option>`).join('');
+  aspect.addEventListener('change', () => {
+    doc.bg.aspect = aspect.value;
+    bgChanged();
+  });
+
+  // The frame works with or without the background.
+  const frame = $<HTMLSelectElement>('bgFrame');
+  frame.addEventListener('change', () => {
+    doc.bg.frame = frame.value as Doc['bg']['frame'];
+    commit();
+    syncBgPanel();
+    render();
+  });
+  const frameText = $<HTMLInputElement>('bgFrameText');
+  frameText.addEventListener('input', () => {
+    doc.bg.frameText = frameText.value;
+    render();
+  });
+  frameText.addEventListener('change', commit);
+  frameText.addEventListener('keydown', (e) => e.stopPropagation());
+  const theme = $<HTMLSelectElement>('bgFrameTheme');
+  theme.addEventListener('change', () => {
+    doc.bg.frameTheme = theme.value as 'auto';
+    commit();
+    render();
+  });
 }
 
 function syncBgPanel() {
-  $<HTMLInputElement>('bgEnabled').checked = doc.bg.enabled;
-  $<HTMLInputElement>('bgPadding').value = String(doc.bg.padding);
-  $<HTMLInputElement>('bgRadius').value = String(doc.bg.radius);
-  $<HTMLInputElement>('bgShadow').checked = doc.bg.shadow;
+  const bg = doc.bg;
+  $<HTMLInputElement>('bgEnabled').checked = bg.enabled;
+  $<HTMLInputElement>('bgPadding').value = String(bg.padding);
+  $<HTMLInputElement>('bgRadius').value = String(bg.radius);
+  $<HTMLInputElement>('bgShadow').checked = bg.shadow;
+  $<HTMLSelectElement>('bgAspect').value = bg.aspect ?? 'auto';
+  $<HTMLSelectElement>('bgFrame').value = bg.frame ?? 'none';
+  $<HTMLInputElement>('bgFrameText').value = bg.frameText ?? '';
+  $<HTMLSelectElement>('bgFrameTheme').value = bg.frameTheme ?? 'auto';
+  const framed = (bg.frame ?? 'none') !== 'none';
+  $('frameOptions').hidden = !framed;
+  $<HTMLInputElement>('bgFrameText').placeholder = bg.frame === 'browser' ? 'Address, e.g. example.com' : 'Window title';
+  if (bg.color) $<HTMLInputElement>('bgColor').value = bg.color;
   for (const b of Array.from(document.querySelectorAll<HTMLElement>('[data-preset]'))) {
-    b.classList.toggle('active', b.dataset.preset === doc.bg.preset);
+    b.classList.toggle('active', b.dataset.preset === bg.preset);
   }
 }
 
@@ -1749,15 +1483,15 @@ async function autoRedact() {
   if (!ready || redacting) return;
   redacting = true;
   try {
-    if (textDetection === 'pending') toast('Reading text…');
-    await textReady;
-    if (textDetection === 'failed') {
+    if (ocr.status === 'pending') toast('Reading text…');
+    await ocr.ready;
+    if (ocr.status === 'failed') {
       toast('Text recognition is unavailable, so there is nothing to redact');
       return;
     }
     const existing = doc.shapes.filter((s) => s.type === 'redact');
     const covered = (r: Rect) => existing.some((s) => inRect({ x: r.x + r.w / 2, y: r.y + r.h / 2 }, norm(s)));
-    const fresh = findSensitive(ocrLines).filter((f) => !covered(f.box));
+    const fresh = findSensitive(ocr.ocr).filter((f) => !covered(f.box));
     if (!fresh.length) {
       toast(existing.length ? 'Nothing else to redact' : 'No emails, numbers or keys found');
       return;
@@ -1769,7 +1503,7 @@ async function autoRedact() {
     }
     commit();
     render();
-    const parts = [...counts].map(([k, n]) => `${n} ${n === 1 ? k : PLURAL[k] ?? k}`);
+    const parts = [...counts].map(([k, n]) => `${n} ${n === 1 ? k : (PLURAL[k] ?? k)}`);
     toast(`Redacted ${parts.join(', ')}. Ctrl+Z to undo`);
   } finally {
     redacting = false;
@@ -1781,31 +1515,53 @@ async function autoRedact() {
 // ---------------------------------------------------------------------------------------------
 
 let toastTimer = 0;
-function toast(text: string) {
+function toast(msg: string) {
   const el = $('toast');
-  el.textContent = text;
+  el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+const toBlob = (cv: HTMLCanvasElement, type: string, q?: number) =>
+  new Promise<Blob | null>((r) => cv.toBlob(r, type, q));
+
+const bytes = async (b: Blob | null) => (b ? new Uint8Array(await b.arrayBuffer()) : null);
+
+/** The finished image, at 1× if the user asked for standard resolution. */
+function renderFinal(): HTMLCanvasElement {
+  const v = computeView(doc, false);
+  const cv = document.createElement('canvas');
+  cv.width = v.W;
+  cv.height = v.H;
+  paintDoc(cv.getContext('2d')!, doc, v, doc.shapes);
+  if (settings.exportScale !== '1x' || env.unit <= 1) return cv;
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(v.W / env.unit));
+  out.height = Math.max(1, Math.round(v.H / env.unit));
+  const c = out.getContext('2d')!;
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(cv, 0, 0, out.width, out.height);
+  return out;
 }
 
 async function doExport(kind: string) {
   if (!ready) return;
   if (editing) commitText();
   if (tool === 'crop') setTool(prevTool);
-  const off = document.createElement('canvas');
-  paint(off.getContext('2d')!, true);
-  const blob = await new Promise<Blob | null>((r) => off.toBlob(r, 'image/png'));
-  if (!blob) {
+  const cv = renderFinal();
+  const png = await bytes(await toBlob(cv, 'image/png'));
+  if (!png) {
     toast('Export failed');
     return;
   }
-  const res = await window.api.invoke<{ ok: boolean; message?: string }>(
-    'editor:export',
-    kind,
-    new Uint8Array(await blob.arrayBuffer()),
-    snapshot(),
-  );
+  // WebP is encoded here (Electron's main process can't); only when it may be needed.
+  const needWebp = kind === 'saveAs' || (kind === 'save' && settings.format === 'webp');
+  const webp = needWebp ? await bytes(await toBlob(cv, 'image/webp', 0.9)) : null;
+  if (kind === 'upload') toast('Uploading…');
+  const res = await window.api.invoke<{ ok: boolean; message?: string }>('editor:export', kind, png, snapshot(), {
+    webp,
+  });
   // Copying is the "done" action: the image is on the clipboard, so close the editor.
   if (kind === 'copy' && res?.ok) {
     window.close();
@@ -1822,36 +1578,79 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Shift') shiftDown = true;
   if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
   const k = e.key.toLowerCase();
+  if (e.key === ' ') {
+    if (!spaceDown && !action) canvas.style.cursor = 'grab';
+    spaceDown = true;
+    e.preventDefault();
+    return;
+  }
   if (e.ctrlKey) {
+    const shapesSelected = tool === 'select' && sel.length > 0;
     if (k === 'z' && !e.shiftKey) undo();
     else if (k === 'y' || (k === 'z' && e.shiftKey)) redo();
+    // With shapes selected, Ctrl+C/X copy the shapes; otherwise Ctrl+C copies the image.
+    else if (k === 'c' && shapesSelected) copyShapes(false);
+    else if (k === 'x' && shapesSelected) copyShapes(true);
     else if (k === 'c') doExport('copy');
-    else if (k === 's') doExport(e.shiftKey ? 'saveAs' : 'save');
+    else if (k === 'v') pasteShapes();
+    else if (k === 'd') addCopies(targets(), 12 * env.unit);
+    else if (k === 'a') {
+      setTool('select');
+      sel = doc.shapes.map((s) => s.id);
+      updateToolbar();
+      render();
+    } else if (k === 's') doExport(e.shiftKey ? 'saveAs' : 'save');
+    else if (k === '0') setZoom(null);
+    else if (k === '1') setZoom(1);
+    else if (k === '=' || k === '+') setZoom(currentZoom() * 1.25);
+    else if (k === '-') setZoom(currentZoom() / 1.25);
+    else if (k === ']') arrange('front');
+    else if (k === '[') arrange('back');
     else return;
     e.preventDefault();
     return;
   }
   if (tool === 'crop' && k === 'enter') return applyCrop();
   if (k === 'escape') {
-    if (tool === 'crop') setTool(prevTool);
+    if (!menu.hidden) hideMenu();
+    else if (tool === 'crop') setTool(prevTool);
     else {
-      selectedId = null;
+      sel = [];
+      updateToolbar();
       render();
     }
     return;
   }
+  const step = (e.shiftKey ? 10 : 1) * env.unit;
+  const arrows: Record<string, P> = {
+    arrowleft: { x: -step, y: 0 },
+    arrowright: { x: step, y: 0 },
+    arrowup: { x: 0, y: -step },
+    arrowdown: { x: 0, y: step },
+  };
+  if (arrows[k] && targets().length) {
+    e.preventDefault();
+    return nudge(arrows[k].x, arrows[k].y);
+  }
   if (k === 'delete' || k === 'backspace') return deleteSelected();
+  if (k === ']') return arrange('forward');
+  if (k === '[') return arrange('backward');
   if (k === 'f') return toggleFill();
-  if (k === '1' || k === '2' || k === '3') return setSize(Number(k) - 1);
+  if (k === 'i' && 'EyeDropper' in window) return void pickColor();
+  if (k >= '1' && k <= '4') return setSize(Number(k) - 1);
   const t = TOOLS.find((x) => x.key === k);
   if (!t || e.altKey) return;
   // Pressing an active tool's key again steps through its styles.
-  if (t.id === tool && styleTarget()) cycleStyle();
+  if (t.id === tool && optionTarget()) cycleStyle();
   else setTool(t.id);
 });
 
 window.addEventListener('keyup', (e) => {
   if (e.key === 'Shift') shiftDown = false;
+  if (e.key === ' ') {
+    spaceDown = false;
+    if (action?.kind !== 'pan') canvas.style.cursor = cursorFor(tool);
+  }
 });
 
 // The stage also changes size when the toolbar wraps onto another row (e.g. as style buttons appear).
@@ -1866,22 +1665,27 @@ new ResizeObserver(() => {
 async function init() {
   buildToolbar();
   buildBgPanel();
-  const d = await window.api.invoke<{ name: string; dataUrl: string; scale: number; doc: Doc | null }>(
-    'editor:load',
-  );
+  setOpacity(prefs.opacity, false);
+  const [d, s] = await Promise.all([
+    window.api.invoke<{ name: string; dataUrl: string; scale: number; doc: Doc | null }>('editor:load'),
+    window.api.invoke<{ settings: EditorSettings }>('settings:get').catch(() => null),
+  ]);
+  if (s?.settings) settings = { ...settings, ...s.settings };
+  $('uploadBtn').hidden = !settings.uploadService || settings.uploadService === 'none';
   document.title = `${d.name} — ShotKit Editor`;
-  img = new Image();
+  const img = new Image();
   img.src = d.dataUrl;
   await img.decode();
-  imgW = img.naturalWidth;
-  imgH = img.naturalHeight;
-  unit = Math.max(1, d.scale || 1);
+  env.img = img;
+  env.imgW = img.naturalWidth;
+  env.imgH = img.naturalHeight;
+  env.unit = Math.max(1, d.scale || 1);
   if (d.doc) {
     // Annotations saved the last time this capture was edited.
     doc.shapes = d.doc.shapes ?? [];
     doc.crop = d.doc.crop ?? null;
     doc.bg = { ...doc.bg, ...d.doc.bg };
-    nextId = Math.max(0, ...doc.shapes.map((s) => s.id)) + 1;
+    nextId = Math.max(0, ...doc.shapes.map((x) => x.id)) + 1;
   }
   lastState = snapshot();
   ready = true;
@@ -1889,8 +1693,8 @@ async function init() {
   syncBgPanel();
   updateToolbar();
   updateCropBar();
-  paint(ctx, false);
-  textReady = detectText();
+  paint();
+  detectText(() => window.api.invoke<Word[][]>('editor:words'));
 }
 
 init().catch((e) => toast(`Could not load image: ${e instanceof Error ? e.message : e}`));

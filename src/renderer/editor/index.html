@@ -18,6 +18,11 @@
       <div class="sep"></div>
       <div class="group" id="sizes"></div>
       <button id="fill" class="tool" title="Filled shapes (F)"></button>
+      <label class="opacity" title="Opacity">
+        <span id="opacityIcon"></span>
+        <input type="range" id="opacity" min="10" max="100" step="5" />
+        <span id="opacityValue"></span>
+      </label>
       <div class="sep" id="stylesSep" hidden></div>
       <div class="group" id="styles" hidden></div>
       <div class="sep"></div>
@@ -29,9 +34,12 @@
         class="tool wide"
         title="Find and black out emails, phone numbers, card numbers, IBANs, IP addresses and API keys"
       ></button>
-      <button id="bgToggle" class="tool wide" title="Background & padding"></button>
+      <button id="bgToggle" class="tool wide" title="Background, window frame & padding"></button>
       <div class="sep"></div>
       <div class="group actions">
+        <button id="uploadBtn" data-export="upload" class="btn ghost" title="Upload and copy the link" hidden>
+          Upload
+        </button>
         <button data-export="pin" class="btn ghost" title="Pin to screen">Pin</button>
         <button data-export="saveAs" class="btn ghost" title="Save As (Ctrl+Shift+S)">Save As…</button>
         <button data-export="copy" class="btn" title="Copy (Ctrl+C)">Copy</button>
@@ -39,23 +47,48 @@
       </div>
     </header>
     <div id="main">
-      <div id="stage">
-        <canvas id="canvas"></canvas>
-        <textarea id="textInput" hidden spellcheck="false" rows="1"></textarea>
+      <div id="stageWrap">
+        <div id="stage">
+          <canvas id="canvas"></canvas>
+          <textarea id="textInput" hidden spellcheck="false" rows="1"></textarea>
+        </div>
         <div id="cropBar" hidden>
           <span id="cropSize"></span>
           <button id="cropReset" class="btn ghost">Reset</button>
           <button id="cropCancel" class="btn ghost">Cancel</button>
           <button id="cropApply" class="btn primary">Apply crop</button>
         </div>
+        <button
+          id="zoomLabel"
+          title="Zoom: Ctrl + scroll, Ctrl + / Ctrl −, Ctrl+0 to fit, Ctrl+1 for 100%. Hold Space and drag to pan. Click to switch between fit and 100%."
+        ></button>
+        <div id="menu" hidden></div>
       </div>
       <aside id="bgPanel" hidden>
         <h3>Background</h3>
         <label class="check"><input type="checkbox" id="bgEnabled" /> Show background</label>
         <div id="bgSwatches"></div>
+        <input type="color" id="bgColor" class="hiddenInput" />
+        <input type="file" id="bgFile" class="hiddenInput" accept="image/*" />
         <label class="slider">Padding <input type="range" id="bgPadding" min="0" max="200" /></label>
         <label class="slider">Corner radius <input type="range" id="bgRadius" min="0" max="48" /></label>
+        <label class="field">Size <select id="bgAspect"></select></label>
         <label class="check"><input type="checkbox" id="bgShadow" /> Drop shadow</label>
+        <h3>Window frame</h3>
+        <select id="bgFrame">
+          <option value="none">None</option>
+          <option value="mac">macOS window</option>
+          <option value="windows">Windows window</option>
+          <option value="browser">Browser</option>
+        </select>
+        <div id="frameOptions" hidden>
+          <input id="bgFrameText" spellcheck="false" />
+          <select id="bgFrameTheme">
+            <option value="auto">Match the screenshot</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
       </aside>
     </div>
     <div id="toast"></div>

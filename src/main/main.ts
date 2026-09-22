@@ -1,6 +1,8 @@
 import { app, globalShortcut, Menu, MenuItemConstructorOptions, nativeTheme, screen, Tray } from 'electron';
 import { getSettings, isFirstRun, onSettingsChanged, TimerMode, updateSettings } from './settings';
 import { CaptureMode, initCapture, startCapture, startTimedCapture } from './capture';
+import { indexMissingText } from './history';
+import { isRecording, stopRecording } from './recording';
 import { registerHotkeys } from './hotkeys';
 import { registerIpc } from './ipc';
 import { makeIcon } from './icon';
@@ -18,6 +20,10 @@ const LABELS: Record<string, string> = {
   scrolling: 'Scrolling Capture',
   ocr: 'Capture Text (OCR)',
   timer: 'Self-Timer',
+  previous: 'Capture Previous Area',
+  record: 'Record Screen',
+  colorPicker: 'Pick Colour from Screen',
+  measure: 'Measure on Screen',
   history: 'Capture History',
 };
 
@@ -72,7 +78,14 @@ function buildMenu(): Menu {
     { label: LABELS.fullscreen, ...acc(hk.fullscreen), click: captureLater('fullscreen') },
     { label: LABELS.scrolling, ...acc(hk.scrolling), click: captureLater('scrolling') },
     { label: LABELS.ocr, ...acc(hk.ocr), click: captureLater('ocr') },
+    { label: LABELS.previous, ...acc(hk.previous), click: captureLater('previous') },
     timerMenu(acc(hk.timer)),
+    isRecording()
+      ? { label: 'Stop Recording', ...acc(hk.record), click: () => stopRecording() }
+      : { label: LABELS.record, ...acc(hk.record), click: captureLater('record') },
+    { type: 'separator' },
+    { label: LABELS.colorPicker, ...acc(hk.colorPicker), click: captureLater('color') },
+    { label: LABELS.measure, ...acc(hk.measure), click: captureLater('measure') },
     { type: 'separator' },
     { label: 'Open Image in Editor…', click: () => openEditorFromDialog() },
     { label: 'Pin Image to Screen…', click: () => openPinFromDialog() },
@@ -172,6 +185,9 @@ function main() {
       registerHotkeys();
       applyLoginItem();
     });
+
+    // Make captures from before text search existed searchable, a while after startup.
+    setTimeout(() => indexMissingText(), 30_000);
 
     if (isFirstRun()) {
       notify('ShotKit is running', 'Press Ctrl+Shift+4 to capture an area. Click the tray icon for more options.');

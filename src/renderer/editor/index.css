@@ -99,21 +99,158 @@ body {
   min-height: 0;
 }
 
-#stage {
+#stageWrap {
   flex: 1;
   position: relative;
+  min-width: 0;
+}
+
+/* Scrolls when zoomed in; `margin: auto` centres the canvas without cutting off overflow. */
+#stage {
+  position: absolute;
+  inset: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  overflow: auto;
+  padding: 32px;
   background:
     radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.07) 1px, transparent 0) 0 0 / 18px 18px,
     #111114;
 }
 
 #canvas {
+  margin: auto;
+  flex: none;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
   touch-action: none;
+}
+
+#canvas.pixelated {
+  image-rendering: pixelated;
+}
+
+#zoomLabel {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  border: 1px solid var(--border);
+  background: rgba(34, 34, 38, 0.92);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 3px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+#zoomLabel:hover {
+  color: var(--text);
+}
+
+#menu {
+  position: absolute;
+  z-index: 10;
+  min-width: 190px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 5px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+#menu button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 20px;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#menu button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+#menu kbd {
+  font-family: inherit;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#menu button:hover kbd {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#menu .msep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+.tool.mini {
+  width: 26px;
+  position: relative;
+}
+
+.tool.mini input[type='color'] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tool.textopt span {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.sep.small {
+  height: 16px;
+  margin: 0 3px;
+}
+
+.opacity {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.opacity input {
+  width: 70px;
+}
+
+#opacityValue {
+  width: 34px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hiddenInput {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+}
+
+#frameOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 #textInput {
@@ -132,7 +269,7 @@ body {
   font-family: 'Segoe UI', system-ui, sans-serif;
 }
 
-#textInput.callout {
+#textInput.boxed {
   background: transparent;
 }
 
@@ -187,6 +324,14 @@ body {
   border: 2px solid transparent;
   cursor: pointer;
   padding: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+
+.bgswatch svg {
+  width: 16px;
+  height: 16px;
 }
 
 .bgswatch.active {
@@ -228,4 +373,9 @@ body {
 #toast.show {
   opacity: 1;
   transform: translateX(-50%);
+}
+
+#bgPanel > select,
+#frameOptions > * {
+  width: 100%;
 }

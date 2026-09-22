@@ -135,3 +135,38 @@ body.right .card.entering {
   font-weight: 600;
   font-size: 15px;
 }
+
+.topmid {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+}
+
+.topmid .corner {
+  position: static;
+}
+
+#closeAll {
+  display: block;
+  margin: 6px 0 0 auto;
+  border: none;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(28, 28, 32, 0.9);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+#closeAll:hover {
+  background: rgba(50, 50, 56, 0.95);
+}
+
+body:not(.right) #closeAll {
+  margin: 6px auto 0 0;
+}

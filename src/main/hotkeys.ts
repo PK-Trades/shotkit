@@ -10,6 +10,10 @@ const actions: Record<HotkeyAction, () => void> = {
   scrolling: () => startCapture('scrolling'),
   ocr: () => startCapture('ocr'),
   timer: () => startTimedCapture(),
+  previous: () => startCapture('previous'),
+  record: () => startCapture('record'),
+  colorPicker: () => startCapture('color'),
+  measure: () => startCapture('measure'),
   history: () => openHistory(),
 };
 

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { getSettings } from './settings';
 import { addToHistory, HistoryItem, thumbDataUrl } from './history';
 import { appIcon } from './icon';
+import { uploadConfigured } from './upload';
 import { clamp } from './util';
 
 export const pagePath = (page: string) => path.join(__dirname, 'renderer', page, 'index.html');
@@ -68,6 +69,7 @@ export async function showInQuickAccess(item: HistoryItem) {
     height: item.height,
     timeout: s.quickAccessTimeout,
     side: s.quickAccessPosition,
+    canUpload: uploadConfigured(),
   });
 }
 

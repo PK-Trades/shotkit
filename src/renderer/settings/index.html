@@ -37,6 +37,29 @@
           <label>Auto-close Quick Access after (seconds, 0 = never)</label>
           <input type="number" min="0" max="600" data-setting="quickAccessTimeout" />
         </div>
+        <div class="row">
+          <label>Dragging a capture out of Quick Access gives a</label>
+          <select data-setting="dragFormat">
+            <option value="png">PNG file</option>
+            <option value="jpg">JPEG file (smaller)</option>
+          </select>
+        </div>
+      </section>
+
+      <section>
+        <h2>Capturing</h2>
+        <label class="check"><input type="checkbox" data-setting="freezeScreen" /> Freeze the screen while selecting</label>
+        <p class="note sub">Turn off to keep animations and videos playing; the capture is taken when you finish selecting.</p>
+        <label class="check"><input type="checkbox" data-setting="showMagnifier" /> Show magnifier while selecting</label>
+        <label class="check"><input type="checkbox" data-setting="captureCursor" /> Include the mouse pointer</label>
+        <div class="row">
+          <label>Window captures</label>
+          <select data-setting="windowStyle">
+            <option value="plain">As they are</option>
+            <option value="rounded">Rounded corners</option>
+            <option value="shadow">Rounded, with a shadow</option>
+          </select>
+        </div>
       </section>
 
       <section>
@@ -69,21 +92,100 @@
           <button id="openFolder" class="btn ghost">Open</button>
         </div>
         <div class="row">
+          <label>File name</label>
+          <input class="wide" data-setting="fileNameTemplate" spellcheck="false" />
+        </div>
+        <p class="note">
+          Example: <span id="namePreview"></span><br />
+          Use {date} {time} {year} {month} {day} {hour} {minute} {second} {app} {title} {mode} {width} {height}
+          {n}. A “/” makes folders, e.g. <code>{year}-{month}/{app} {time}</code>.
+        </p>
+        <div class="row">
           <label>File format</label>
           <select data-setting="format">
             <option value="png">PNG</option>
             <option value="jpg">JPEG</option>
+            <option value="webp">WebP (smallest)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>JPEG quality (50–100)</label>
+          <input type="number" min="50" max="100" data-setting="jpgQuality" />
+        </div>
+        <div class="row">
+          <label>On high-DPI screens, save at</label>
+          <select data-setting="exportScale">
+            <option value="full">Full resolution</option>
+            <option value="1x">Normal size (1×)</option>
           </select>
         </div>
         <div class="row">
           <label>Captures kept in history</label>
           <input type="number" min="10" max="5000" data-setting="historyLimit" />
         </div>
+        <label class="check"><input type="checkbox" data-setting="indexText" /> Make text in captures searchable in history</label>
+      </section>
+
+      <section>
+        <h2>Screen recording</h2>
+        <div class="row">
+          <label>Format</label>
+          <select data-setting="recordFormat">
+            <option value="mp4">Video (MP4)</option>
+            <option value="gif">Animated GIF</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Frames per second</label>
+          <select data-setting="recordFps" data-number>
+            <option value="15">15</option>
+            <option value="24">24</option>
+            <option value="30">30</option>
+            <option value="60">60</option>
+          </select>
+        </div>
+        <p class="note">GIFs are recorded at up to 15 fps and 960 pixels wide to keep them small. Recordings are saved to the save folder.</p>
+      </section>
+
+      <section>
+        <h2>Sharing</h2>
+        <div class="row">
+          <label>Upload to</label>
+          <select data-setting="uploadService">
+            <option value="none">Off</option>
+            <option value="imgur">Imgur</option>
+            <option value="custom">My own server</option>
+          </select>
+        </div>
+        <div data-service="imgur">
+          <div class="row">
+            <label>Imgur Client ID</label>
+            <input class="wide" data-setting="imgurClientId" spellcheck="false" />
+          </div>
+          <p class="note">Register an app at api.imgur.com/oauth2/addclient (choose “anonymous usage”) to get a Client ID. Uploads are public to anyone with the link.</p>
+        </div>
+        <div data-service="custom">
+          <div class="row">
+            <label>Upload URL (POST)</label>
+            <input class="wide" data-setting="customUploadUrl" placeholder="https://example.com/upload" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label>File field name</label>
+            <input class="wide" data-setting="customUploadField" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label>Link in the JSON response</label>
+            <input class="wide" data-setting="customUploadUrlPath" placeholder="e.g. data.url (empty: the whole response)" spellcheck="false" />
+          </div>
+          <div class="row top">
+            <label>Extra headers</label>
+            <textarea class="wide" rows="2" data-setting="customUploadHeaders" placeholder="Authorization: Bearer …" spellcheck="false"></textarea>
+          </div>
+        </div>
       </section>
 
       <section>
         <h2>General</h2>
-        <label class="check"><input type="checkbox" data-setting="showMagnifier" /> Show magnifier while selecting</label>
         <label class="check"><input type="checkbox" data-setting="launchAtLogin" /> Launch ShotKit at login (installed app only)</label>
       </section>
     </main>

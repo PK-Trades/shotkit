@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>ShotKit Recording</title>
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <div class="bar">
+      <span class="dot"></span>
+      <span id="time">Starting…</span>
+      <button id="stop" class="btn primary">Stop</button>
+      <button id="cancel" class="btn ghost">Cancel</button>
+    </div>
+    <div id="frame" hidden></div>
+    <script src="recordbar.js"></script>
+  </body>
+</html>

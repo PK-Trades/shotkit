@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # Push a tag like v0.2.0 (e.g. `npm version minor && git push --follow-tags`) to build the
 # Windows installer and publish it as a GitHub Release. Installed copies of ShotKit check these
@@ -33,6 +33,25 @@ jobs:
       - run: npm ci
 
       - run: npm run typecheck
+
+      - run: npm test
+
+      # Code signing is optional: add the repository secrets WIN_CSC_LINK (the .pfx certificate,
+      # base64-encoded) and WIN_CSC_KEY_PASSWORD, and electron-builder signs the installer.
+      # Without them the installer is built unsigned, as before.
+      - name: Use code signing certificate
+        shell: bash
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if [ -n "$WIN_CSC_LINK" ]; then
+            echo "CSC_LINK=$WIN_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "Signing is enabled."
+          else
+            echo "No certificate configured; building unsigned."
+          fi
 
       - name: Build and publish installer
         run: npm run release

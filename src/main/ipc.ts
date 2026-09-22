@@ -1,15 +1,18 @@
-import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { finishSelection, overlayReady, Selection } from './capture';
 import {
   clearHistory,
   deleteItem,
+  encode,
   exportToFolder,
   getItem,
   historyIdOf,
   listHistory,
   loadForEditing,
+  readMeta,
+  savedNameFor,
   savedPathFor,
   saveEdits,
   thumbDataUrl,
@@ -20,6 +23,7 @@ import { failedHotkeys, registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { ocrToClipboard, recognizeWords } from './ocr';
 import { requestScrollStop } from './scrolling';
 import { getSettings, Settings, updateSettings } from './settings';
+import { uploadAndCopy, uploadConfigured } from './upload';
 import {
   editImage,
   editorFile,
@@ -30,7 +34,7 @@ import {
   resizeQuickAccess,
   zoomPin,
 } from './windows';
-import { clamp, notify } from './util';
+import { clamp, errorMessage, notify } from './util';
 
 const MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
@@ -49,8 +53,12 @@ async function itemAction(id: string, action: string) {
       clipboard.writeImage(nativeImage.createFromPath(it.path));
       break;
     case 'save': {
-      const p = exportToFolder(it);
-      notify('Screenshot saved', p, () => shell.showItemInFolder(p));
+      try {
+        const p = await exportToFolder(it);
+        notify('Screenshot saved', p, () => shell.showItemInFolder(p));
+      } catch (e) {
+        notify('Could not save screenshot', errorMessage(e));
+      }
       break;
     }
     case 'edit':
@@ -62,6 +70,8 @@ async function itemAction(id: string, action: string) {
     case 'ocr':
       await ocrToClipboard(nativeImage.createFromPath(it.path));
       break;
+    case 'upload':
+      return { ok: !!(await uploadAndCopy(fs.readFileSync(it.path), `${path.basename(savedNameFor(it))}.png`)) };
     case 'folder': {
       const saved = savedPathFor(it);
       shell.showItemInFolder(fs.existsSync(saved) ? saved : it.path);
@@ -75,6 +85,18 @@ async function itemAction(id: string, action: string) {
   return { ok: true };
 }
 
+/** The file to drag out of Quick Access, in the format chosen in Settings. */
+function dragFile(id: string): string | null {
+  const it = getItem(id);
+  if (!it) return null;
+  if (getSettings().dragFormat !== 'jpg') return it.path;
+  const dir = path.join(app.getPath('temp'), 'shotkit', 'drag');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${path.basename(savedNameFor(it))}.jpg`);
+  fs.writeFileSync(file, nativeImage.createFromPath(it.path).toJPEG(getSettings().jpgQuality || 92));
+  return file;
+}
+
 export function registerIpc() {
   // Capture overlay -------------------------------------------------------------------------
   ipcMain.on('overlay:ready', (e) => overlayReady(e.sender));
@@ -83,16 +105,22 @@ export function registerIpc() {
   // Quick Access ----------------------------------------------------------------------------
   ipcMain.on('qa:resize', (_e, height: number) => resizeQuickAccess(height));
   ipcMain.on('qa:drag', (e, id: string) => {
-    const it = getItem(id);
-    if (!it) return;
+    const file = dragFile(id);
+    if (!file) return;
     let icon = nativeImage.createFromPath(thumbPath(id));
-    icon = icon.isEmpty() ? nativeImage.createFromPath(it.path).resize({ width: 96 }) : icon.resize({ width: 96 });
-    e.sender.startDrag({ file: it.path, icon });
+    icon = icon.isEmpty() ? nativeImage.createFromPath(file).resize({ width: 96 }) : icon.resize({ width: 96 });
+    e.sender.startDrag({ file, icon });
   });
   ipcMain.handle('qa:action', (_e, id: string, action: string) => itemAction(id, action));
 
   // History ---------------------------------------------------------------------------------
-  ipcMain.handle('history:list', () => listHistory().map((it) => ({ ...it, thumb: thumbDataUrl(it) })));
+  ipcMain.handle('history:list', () => ({
+    canUpload: uploadConfigured(),
+    items: listHistory().map((it) => {
+      const m = readMeta(it.id);
+      return { ...it, thumb: thumbDataUrl(it), name: savedNameFor(it), app: m.app, title: m.title, text: m.text };
+    }),
+  }));
   ipcMain.handle('history:action', (_e, id: string, action: string) => itemAction(id, action));
   ipcMain.handle('history:clear', () => {
     clearHistory();
@@ -129,55 +157,73 @@ export function registerIpc() {
     }
   });
 
-  ipcMain.handle('editor:export', async (e, action: string, bytes: Uint8Array, docJson?: string) => {
-    const png = Buffer.from(bytes);
-    const img = nativeImage.createFromBuffer(png);
-    const src = editorFile(e.sender.id);
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const s = getSettings();
-    const historyId = src ? historyIdOf(src) : null;
-    const base = src ? path.parse(src).name + (historyId ? '' : ' (edited)') : timestampName();
+  ipcMain.handle(
+    'editor:export',
+    async (e, action: string, bytes: Uint8Array, docJson?: string, extra?: { webp?: Uint8Array | null }) => {
+      const png = Buffer.from(bytes);
+      const img = nativeImage.createFromBuffer(png);
+      const webp = extra?.webp ? Buffer.from(extra.webp) : null;
+      const src = editorFile(e.sender.id);
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const s = getSettings();
+      const historyId = src ? historyIdOf(src) : null;
+      const item = historyId ? getItem(historyId) : null;
+      // History captures save under their template name; other files next to "<name> (edited)".
+      const base = item ? savedNameFor(item) : src ? `${path.parse(src).name} (edited)` : timestampName();
 
-    // Whatever the user does with the result, the capture in history keeps its annotations editable.
-    if (historyId && docJson) {
+      // Whatever the user does with the result, the capture in history keeps its annotations editable.
+      if (historyId && docJson) {
+        try {
+          saveEdits(historyId, png, docJson);
+          notifyHistoryChanged();
+        } catch (err) {
+          console.warn('Could not store edits:', err);
+        }
+      }
+
+      const bytesFor = async (format: 'png' | 'jpg' | 'webp') =>
+        format === 'webp' && webp ? webp : format === 'png' ? png : encode(img, format);
+
       try {
-        saveEdits(historyId, png, docJson);
-        notifyHistoryChanged();
+        switch (action) {
+          case 'copy':
+            clipboard.writeImage(img);
+            return { ok: true, message: 'Copied to clipboard' };
+          case 'save': {
+            const target = path.join(s.saveFolder, `${base}.${s.format}`);
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, await bytesFor(s.format));
+            return { ok: true, message: `Saved to ${target}` };
+          }
+          case 'saveAs': {
+            const opts = {
+              defaultPath: path.join(s.saveFolder, `${path.basename(base)}.png`),
+              filters: [
+                { name: 'PNG image', extensions: ['png'] },
+                { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
+                { name: 'WebP image (smaller)', extensions: ['webp'] },
+              ],
+            };
+            const r = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+            if (r.canceled || !r.filePath) return { ok: false };
+            const format = /\.jpe?g$/i.test(r.filePath) ? 'jpg' : /\.webp$/i.test(r.filePath) ? 'webp' : 'png';
+            fs.writeFileSync(r.filePath, await bytesFor(format));
+            return { ok: true, message: `Saved to ${r.filePath}` };
+          }
+          case 'upload': {
+            const link = await uploadAndCopy(png, `${path.basename(base)}.png`);
+            return { ok: !!link, message: link ? 'Link copied to the clipboard' : 'Upload failed' };
+          }
+          case 'pin':
+            openPin(img);
+            return { ok: true };
+        }
       } catch (err) {
-        console.warn('Could not store edits:', err);
+        return { ok: false, message: `Failed: ${errorMessage(err)}` };
       }
-    }
-
-    switch (action) {
-      case 'copy':
-        clipboard.writeImage(img);
-        return { ok: true, message: 'Copied to clipboard' };
-      case 'save': {
-        fs.mkdirSync(s.saveFolder, { recursive: true });
-        const target = path.join(s.saveFolder, `${base}.${s.format}`);
-        fs.writeFileSync(target, s.format === 'jpg' ? img.toJPEG(92) : png);
-        return { ok: true, message: `Saved to ${target}` };
-      }
-      case 'saveAs': {
-        const opts = {
-          defaultPath: path.join(s.saveFolder, `${base}.png`),
-          filters: [
-            { name: 'PNG image', extensions: ['png'] },
-            { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
-          ],
-        };
-        const r = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
-        if (r.canceled || !r.filePath) return { ok: false };
-        const jpg = /\.jpe?g$/i.test(r.filePath);
-        fs.writeFileSync(r.filePath, jpg ? img.toJPEG(92) : png);
-        return { ok: true, message: `Saved to ${r.filePath}` };
-      }
-      case 'pin':
-        openPin(img);
-        return { ok: true };
-    }
-    return { ok: false };
-  });
+      return { ok: false };
+    },
+  );
 
   // Pinned screenshots ----------------------------------------------------------------------
   const pinWin = (e: Electron.IpcMainEvent) => BrowserWindow.fromWebContents(e.sender);

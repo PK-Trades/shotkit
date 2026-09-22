@@ -1,5 +1,5 @@
-// Thin Win32 bindings (via koffi FFI) for things Electron doesn't expose:
-// enumerating top-level windows, synthesizing mouse-wheel input, and toggling desktop icons.
+// Thin Win32 bindings (via koffi FFI) for things Electron doesn't expose: enumerating top-level
+// windows, the app in front, synthesizing mouse-wheel input, and toggling desktop icons.
 import koffi from 'koffi';
 
 export interface WinInfo {
@@ -29,6 +29,7 @@ function load(): Record<string, Fn> {
   if (api) return api;
   const user32 = koffi.load('user32.dll');
   const dwmapi = koffi.load('dwmapi.dll');
+  const kernel32 = koffi.load('kernel32.dll');
   koffi.proto('bool EnumWindowsProc(intptr_t hwnd, intptr_t lParam)');
   api = {
     EnumWindows: user32.func('bool __stdcall EnumWindows(EnumWindowsProc *lpEnumFunc, intptr_t lParam)'),
@@ -50,8 +51,48 @@ function load(): Record<string, Fn> {
     DwmGetWindowAttribute: dwmapi.func(
       'long __stdcall DwmGetWindowAttribute(intptr_t hwnd, uint32_t dwAttribute, void *pvAttribute, uint32_t cbAttribute)',
     ),
+    GetForegroundWindow: user32.func('intptr_t __stdcall GetForegroundWindow()'),
+    GetWindowThreadProcessId: user32.func(
+      'uint32_t __stdcall GetWindowThreadProcessId(intptr_t hWnd, void *lpdwProcessId)',
+    ),
+    OpenProcess: kernel32.func('intptr_t __stdcall OpenProcess(uint32_t access, bool inherit, uint32_t pid)'),
+    QueryFullProcessImageNameW: kernel32.func(
+      'bool __stdcall QueryFullProcessImageNameW(intptr_t hProcess, uint32_t flags, void *lpExeName, void *lpdwSize)',
+    ),
+    CloseHandle: kernel32.func('bool __stdcall CloseHandle(intptr_t h)'),
   };
   return api;
+}
+
+const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+/** The app (executable name, e.g. "Chrome") and title of the window in front, if any. */
+export function foregroundWindow(): { app: string; title: string } | null {
+  const w = load();
+  const hwnd = Number(w.GetForegroundWindow());
+  if (!hwnd) return null;
+  const text = Buffer.alloc(1024);
+  const len = w.GetWindowTextW(hwnd, text, text.length / 2);
+  const title = text.toString('utf16le', 0, len * 2);
+  let app = '';
+  const pidBuf = Buffer.alloc(4);
+  w.GetWindowThreadProcessId(hwnd, pidBuf);
+  const proc = Number(w.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pidBuf.readUInt32LE(0)));
+  if (proc) {
+    try {
+      const name = Buffer.alloc(1040);
+      const size = Buffer.alloc(4);
+      size.writeUInt32LE(520, 0);
+      if (w.QueryFullProcessImageNameW(proc, 0, name, size)) {
+        const full = name.toString('utf16le', 0, size.readUInt32LE(0) * 2);
+        const exe = full.split('\\').pop()!.replace(/\.exe$/i, '');
+        app = exe.charAt(0).toUpperCase() + exe.slice(1);
+      }
+    } finally {
+      w.CloseHandle(proc);
+    }
+  }
+  return { app, title };
 }
 
 function className(w: Record<string, Fn>, hwnd: number, buf: Buffer): string {

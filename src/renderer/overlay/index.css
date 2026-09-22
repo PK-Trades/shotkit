@@ -1,6 +1,6 @@
 html,
 body {
-  background: #000;
+  background: transparent;
   overflow: hidden;
   cursor: crosshair;
   user-select: none;
