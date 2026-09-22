@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>ShotKit Pin</title>
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <img id="img" alt="" draggable="false" />
+    <div class="toolbar">
+      <button data-a="opacity" title="Opacity (Ctrl + scroll)"></button>
+      <button data-a="copy" title="Copy (Ctrl+C)"></button>
+      <button data-a="edit" title="Annotate"></button>
+      <button data-a="close" title="Close (Esc)"></button>
+    </div>
+    <div id="toast"></div>
+    <script src="pin.js"></script>
+  </body>
+</html>

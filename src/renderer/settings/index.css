@@ -1,0 +1,84 @@
+body {
+  overflow: auto;
+}
+
+main {
+  max-width: 580px;
+  margin: 0 auto;
+  padding: 22px 26px 40px;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 18px;
+}
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.row > label {
+  flex: 1;
+}
+
+.row input[type='number'] {
+  width: 90px;
+}
+
+.row.folder input {
+  flex: 2;
+  min-width: 0;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.hotkey {
+  width: 220px;
+  text-align: center;
+  cursor: pointer;
+  caret-color: transparent;
+}
+
+.hotkey.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}

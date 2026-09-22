@@ -1,0 +1,80 @@
+html,
+body {
+  background: #000;
+  overflow: hidden;
+  user-select: none;
+  cursor: move;
+}
+
+#img {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  object-fit: fill;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+  pointer-events: none;
+}
+
+.toolbar {
+  position: fixed;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(20, 20, 24, 0.82);
+  border-radius: 10px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: default;
+}
+
+body:hover .toolbar {
+  opacity: 1;
+}
+
+.toolbar button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.toolbar button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.toolbar svg {
+  width: 15px;
+  height: 15px;
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  background: rgba(20, 20, 24, 0.88);
+  color: #fff;
+  padding: 5px 10px;
+  border-radius: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+#toast.show {
+  opacity: 1;
+}

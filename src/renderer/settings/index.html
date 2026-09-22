@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>ShotKit Settings</title>
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Settings</h1>
+
+      <section>
+        <h2>Keyboard shortcuts</h2>
+        <div id="hotkeys"></div>
+        <p class="note">Click a field and press a key combination. Backspace clears it, Esc cancels.</p>
+      </section>
+
+      <section>
+        <h2>After capture</h2>
+        <label class="check"><input type="checkbox" data-setting="copyToClipboard" /> Copy to clipboard</label>
+        <label class="check"><input type="checkbox" data-setting="autoSave" /> Save to folder automatically</label>
+        <label class="check"><input type="checkbox" data-setting="openEditorAfterCapture" /> Open in editor</label>
+        <label class="check"><input type="checkbox" data-setting="showQuickAccess" /> Show Quick Access overlay (when not opening the editor)</label>
+        <div class="row">
+          <label>Quick Access position</label>
+          <select data-setting="quickAccessPosition">
+            <option value="left">Bottom left</option>
+            <option value="right">Bottom right</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Auto-close Quick Access after (seconds, 0 = never)</label>
+          <input type="number" min="0" max="600" data-setting="quickAccessTimeout" />
+        </div>
+      </section>
+
+      <section>
+        <h2>Saving</h2>
+        <div class="row folder">
+          <label>Save folder</label>
+          <input id="saveFolder" readonly />
+          <button id="browse" class="btn">Change…</button>
+          <button id="openFolder" class="btn ghost">Open</button>
+        </div>
+        <div class="row">
+          <label>File format</label>
+          <select data-setting="format">
+            <option value="png">PNG</option>
+            <option value="jpg">JPEG</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Captures kept in history</label>
+          <input type="number" min="10" max="5000" data-setting="historyLimit" />
+        </div>
+      </section>
+
+      <section>
+        <h2>General</h2>
+        <label class="check"><input type="checkbox" data-setting="showMagnifier" /> Show magnifier while selecting</label>
+        <label class="check"><input type="checkbox" data-setting="launchAtLogin" /> Launch ShotKit at login (installed app only)</label>
+      </section>
+    </main>
+    <script src="settings.js"></script>
+  </body>
+</html>

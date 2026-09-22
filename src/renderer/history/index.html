@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>ShotKit — Capture History</title>
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Capture History</h1>
+        <span id="count"></span>
+      </div>
+      <div class="actions">
+        <button id="openFolder" class="btn">Open Save Folder</button>
+        <button id="clear" class="btn danger">Clear History</button>
+      </div>
+    </header>
+    <main id="grid"></main>
+    <div id="empty" hidden>
+      <p>No captures yet.</p>
+      <p class="muted">Press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>4</kbd> to capture an area.</p>
+    </div>
+    <script src="history.js"></script>
+  </body>
+</html>
