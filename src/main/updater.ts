@@ -1,6 +1,7 @@
 // Auto-update from GitHub Releases (published by .github/workflows/release.yml).
-// Flow: check → ask to download → download in the background → ask to restart.
-import { app, dialog } from 'electron';
+// Flow: check (automatically, or from the tray) → notify / ask to download → download in the
+// background → ask to restart.
+import { app, dialog, Notification, powerMonitor } from 'electron';
 import { autoUpdater, UpdateInfo } from 'electron-updater';
 import { errorMessage, notify } from './util';
 
@@ -12,12 +13,18 @@ export type UpdateState =
   | { status: 'ready'; version: string }
   | { status: 'error'; message: string };
 
-const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const STARTUP_DELAY_MS = 10_000;
+const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+/** After a failed automatic check (e.g. no network yet right after login), try again sooner. */
+const RETRY_DELAY_MS = 5 * 60 * 1000;
 
 let state: UpdateState = { status: 'idle' };
 let manualCheck = false;
-/** Versions the user said "Later" to; periodic checks won't ask about them again this session. */
-const dismissed = new Set<string>();
+/** Versions already announced; automatic checks notify about each new version once per session. */
+const announced = new Set<string>();
+let nextCheck: NodeJS.Timeout | undefined;
+/** Held so the toast (and its click handler) isn't garbage collected while it's on screen. */
+let toast: Notification | undefined;
 let onChange: () => void = () => {};
 
 export const updateState = () => state;
@@ -51,7 +58,18 @@ async function askToDownload(info: UpdateInfo) {
     noLink: true,
   });
   if (response === 0) downloadUpdate();
-  else dismissed.add(info.version);
+}
+
+function announce(info: UpdateInfo) {
+  announced.add(info.version);
+  toast = notify('ShotKit update available', `Version ${info.version} is available. Click to download it.`, () =>
+    askToDownload(info),
+  );
+}
+
+function scheduleCheck(ms: number) {
+  clearTimeout(nextCheck);
+  nextCheck = setTimeout(() => checkForUpdates(), ms);
 }
 
 async function askToRestart(version: string) {
@@ -110,11 +128,14 @@ export function initUpdater(changed: () => void) {
   autoUpdater.on('checking-for-update', () => setState({ status: 'checking' }));
   autoUpdater.on('update-not-available', () => {
     setState({ status: 'idle' });
+    scheduleCheck(CHECK_INTERVAL_MS);
     if (manualCheck) notify('ShotKit is up to date', `You have the latest version (${app.getVersion()}).`);
   });
   autoUpdater.on('update-available', (info) => {
     setState({ status: 'available', version: info.version });
-    if (manualCheck || !dismissed.has(info.version)) askToDownload(info);
+    scheduleCheck(CHECK_INTERVAL_MS);
+    if (manualCheck) askToDownload(info);
+    else if (!announced.has(info.version)) announce(info);
   });
   autoUpdater.on('download-progress', (p) => {
     if (state.status === 'downloading') setState({ ...state, percent: Math.round(p.percent) });
@@ -128,9 +149,11 @@ export function initUpdater(changed: () => void) {
     const wasDownloading = state.status === 'downloading';
     setState({ status: 'error', message: errorMessage(e) });
     if (manualCheck || wasDownloading) notify('Update failed', errorMessage(e));
+    scheduleCheck(manualCheck || wasDownloading ? CHECK_INTERVAL_MS : RETRY_DELAY_MS);
   });
 
-  // Give startup a moment, then check periodically.
-  setTimeout(() => checkForUpdates(), 10_000);
-  setInterval(() => checkForUpdates(), CHECK_INTERVAL_MS);
+  // Give startup a moment, then keep checking (each check schedules the next one). Timers don't
+  // run while the PC sleeps, so also check shortly after it wakes up.
+  scheduleCheck(STARTUP_DELAY_MS);
+  powerMonitor.on('resume', () => scheduleCheck(STARTUP_DELAY_MS));
 }

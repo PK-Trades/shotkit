@@ -1,11 +1,12 @@
 import { Notification } from 'electron';
 import { appIcon } from './icon';
 
-export function notify(title: string, body: string, onClick?: () => void) {
+export function notify(title: string, body: string, onClick?: () => void): Notification | undefined {
   if (!Notification.isSupported()) return;
   const n = new Notification({ title, body, icon: appIcon(), silent: true });
   if (onClick) n.on('click', onClick);
   n.show();
+  return n;
 }
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
