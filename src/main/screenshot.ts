@@ -1,5 +1,6 @@
-import { desktopCapturer, Display, NativeImage, Rectangle, screen } from 'electron';
+import { desktopCapturer, Display, NativeImage, nativeImage, Rectangle, screen } from 'electron';
 import { clamp } from './util';
+import { captureScreen } from './win32';
 
 export interface Shot {
   display: Display;
@@ -16,7 +17,29 @@ const physicalSize = (d: Display) => ({
 export async function grabDisplays(only?: number[]): Promise<Shot[]> {
   const all = screen.getAllDisplays();
   const displays = all.filter((d) => !only || only.includes(d.id));
+  try {
+    return displays.map((d) => ({ display: d, image: grabWithGdi(d) }));
+  } catch (e) {
+    console.warn('GDI capture failed, using desktopCapturer:', e);
+    return grabWithDesktopCapturer(all, displays);
+  }
+}
 
+/**
+ * Preferred over desktopCapturer, whose images come out washed out on HDR displays (SDR content
+ * is brightened by the SDR white level and clipped); GDI returns the true SDR colours.
+ */
+function grabWithGdi(d: Display): NativeImage {
+  const r = screen.dipToScreenRect(null, d.bounds);
+  const image = nativeImage.createFromBitmap(captureScreen(r.x, r.y, r.width, r.height), {
+    width: r.width,
+    height: r.height,
+  });
+  if (image.isEmpty()) throw new Error(`Empty capture of display ${d.id}`);
+  return image;
+}
+
+async function grabWithDesktopCapturer(all: Display[], displays: Display[]): Promise<Shot[]> {
   // desktopCapturer scales every thumbnail to the same box, so request one batch per distinct size.
   const bySize = new Map<string, Display[]>();
   for (const d of displays) {

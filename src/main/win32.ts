@@ -28,6 +28,7 @@ let api: Record<string, Fn> | null = null;
 function load(): Record<string, Fn> {
   if (api) return api;
   const user32 = koffi.load('user32.dll');
+  const gdi32 = koffi.load('gdi32.dll');
   const dwmapi = koffi.load('dwmapi.dll');
   const kernel32 = koffi.load('kernel32.dll');
   koffi.proto('bool EnumWindowsProc(intptr_t hwnd, intptr_t lParam)');
@@ -60,8 +61,61 @@ function load(): Record<string, Fn> {
       'bool __stdcall QueryFullProcessImageNameW(intptr_t hProcess, uint32_t flags, void *lpExeName, void *lpdwSize)',
     ),
     CloseHandle: kernel32.func('bool __stdcall CloseHandle(intptr_t h)'),
+    GetDC: user32.func('intptr_t __stdcall GetDC(intptr_t hWnd)'),
+    ReleaseDC: user32.func('int __stdcall ReleaseDC(intptr_t hWnd, intptr_t hDC)'),
+    CreateCompatibleDC: gdi32.func('intptr_t __stdcall CreateCompatibleDC(intptr_t hdc)'),
+    CreateCompatibleBitmap: gdi32.func('intptr_t __stdcall CreateCompatibleBitmap(intptr_t hdc, int cx, int cy)'),
+    SelectObject: gdi32.func('intptr_t __stdcall SelectObject(intptr_t hdc, intptr_t h)'),
+    BitBlt: gdi32.func(
+      'bool __stdcall BitBlt(intptr_t hdc, int x, int y, int cx, int cy, intptr_t hdcSrc, int x1, int y1, uint32_t rop)',
+    ),
+    GetDIBits: gdi32.func(
+      'int __stdcall GetDIBits(intptr_t hdc, intptr_t hbm, uint32_t start, uint32_t cLines, void *lpvBits, void *lpbmi, uint32_t usage)',
+    ),
+    DeleteObject: gdi32.func('bool __stdcall DeleteObject(intptr_t ho)'),
+    DeleteDC: gdi32.func('bool __stdcall DeleteDC(intptr_t hdc)'),
   };
   return api;
+}
+
+const SRCCOPY = 0x00cc0020;
+const CAPTUREBLT = 0x40000000;
+
+/**
+ * BGRA pixels of a rectangle of the desktop (physical pixels), read through GDI. Unlike
+ * desktopCapturer, GDI gets the desktop as SDR, so colours stay true when HDR is on.
+ */
+export function captureScreen(x: number, y: number, width: number, height: number): Buffer {
+  const w = load();
+  const screenDC = Number(w.GetDC(0));
+  if (!screenDC) throw new Error('GetDC failed');
+  const memDC = Number(w.CreateCompatibleDC(screenDC));
+  const bmp = Number(w.CreateCompatibleBitmap(screenDC, width, height));
+  try {
+    if (!memDC || !bmp) throw new Error('Could not create a capture bitmap');
+    const old = w.SelectObject(memDC, bmp);
+    const copied = w.BitBlt(memDC, 0, 0, width, height, screenDC, x, y, SRCCOPY | CAPTUREBLT);
+    // GetDIBits needs the bitmap deselected.
+    w.SelectObject(memDC, old);
+    if (!copied) throw new Error('BitBlt failed');
+    // BITMAPINFOHEADER: 32 bits per pixel, negative height for top-down rows.
+    const info = Buffer.alloc(40);
+    info.writeUInt32LE(40, 0);
+    info.writeInt32LE(width, 4);
+    info.writeInt32LE(-height, 8);
+    info.writeUInt16LE(1, 12);
+    info.writeUInt16LE(32, 14);
+    const pixels = Buffer.alloc(width * height * 4);
+    if (w.GetDIBits(memDC, bmp, 0, height, pixels, info, 0) !== height) throw new Error('GetDIBits failed');
+    // GDI leaves the alpha byte at 0: make every pixel opaque.
+    const px = new Uint32Array(pixels.buffer, pixels.byteOffset, width * height);
+    for (let i = 0; i < px.length; i++) px[i] |= 0xff000000;
+    return pixels;
+  } finally {
+    if (bmp) w.DeleteObject(bmp);
+    if (memDC) w.DeleteDC(memDC);
+    w.ReleaseDC(0, screenDC);
+  }
 }
 
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
