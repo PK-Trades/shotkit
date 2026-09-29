@@ -1,5 +1,6 @@
 // Thin Win32 bindings (via koffi FFI) for things Electron doesn't expose: enumerating top-level
-// windows, the app in front, synthesizing mouse-wheel input, and toggling desktop icons.
+// windows, the app in front, the window under the pointer, synthesizing mouse-wheel input, and
+// toggling desktop icons.
 import koffi from 'koffi';
 
 export interface WinInfo {
@@ -19,6 +20,8 @@ const WS_EX_LAYERED = 0x80000;
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 const DWMWA_CLOAKED = 14;
 const MOUSEEVENTF_WHEEL = 0x0800;
+const GA_ROOT = 2;
+const VK_ESCAPE = 0x1b;
 const SW_HIDE = 0;
 const SW_SHOW = 5;
 
@@ -32,7 +35,11 @@ function load(): Record<string, Fn> {
   const dwmapi = koffi.load('dwmapi.dll');
   const kernel32 = koffi.load('kernel32.dll');
   koffi.proto('bool EnumWindowsProc(intptr_t hwnd, intptr_t lParam)');
+  const POINT = koffi.struct('POINT', { x: 'int32', y: 'int32' });
   api = {
+    WindowFromPoint: user32.func('intptr_t __stdcall WindowFromPoint(POINT pt)'),
+    GetAncestor: user32.func('intptr_t __stdcall GetAncestor(intptr_t hwnd, uint32_t flags)'),
+    GetAsyncKeyState: user32.func('int16_t __stdcall GetAsyncKeyState(int vKey)'),
     EnumWindows: user32.func('bool __stdcall EnumWindows(EnumWindowsProc *lpEnumFunc, intptr_t lParam)'),
     IsWindowVisible: user32.func('bool __stdcall IsWindowVisible(intptr_t hWnd)'),
     IsIconic: user32.func('bool __stdcall IsIconic(intptr_t hWnd)'),
@@ -153,6 +160,19 @@ function className(w: Record<string, Fn>, hwnd: number, buf: Buffer): string {
   const n = w.GetClassNameW(hwnd, buf, buf.length / 2);
   return buf.toString('utf16le', 0, n * 2);
 }
+
+/** The id of the process that owns the top-level window under a screen point (physical pixels). */
+export function processAt(x: number, y: number): number | null {
+  const w = load();
+  const hit = Number(w.WindowFromPoint({ x: Math.round(x), y: Math.round(y) }));
+  if (!hit) return null;
+  const pid = Buffer.alloc(4);
+  w.GetWindowThreadProcessId(Number(w.GetAncestor(hit, GA_ROOT)) || hit, pid);
+  return pid.readUInt32LE(0) || null;
+}
+
+/** Whether Esc is being held down right now. */
+export const escapeDown = () => (load().GetAsyncKeyState(VK_ESCAPE) & 0x8000) !== 0;
 
 /** Visible top-level windows in z-order (topmost first). */
 export function listWindows(exclude: Set<number> = new Set()): WinInfo[] {

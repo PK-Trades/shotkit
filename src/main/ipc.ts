@@ -25,6 +25,7 @@ import { requestScrollStop } from './scrolling';
 import { getSettings, Settings, updateSettings } from './settings';
 import { uploadAndCopy, uploadConfigured } from './upload';
 import {
+  droppedInAnotherApp,
   editImage,
   editorFile,
   notifyHistoryChanged,
@@ -233,6 +234,7 @@ export function registerIpc() {
   );
 
   // "Drag me": the edited image, written to a temp file in the drag format, dragged out as a file.
+  // Like Copy, a drop into another app is what the user came to do, so it closes the editor.
   ipcMain.on('editor:drag', (e, bytes: Uint8Array, docJson?: string) => {
     const png = Buffer.from(bytes);
     const img = nativeImage.createFromBuffer(png);
@@ -244,7 +246,10 @@ export function registerIpc() {
     fs.writeFileSync(file, jpg ? img.toJPEG(getSettings().jpgQuality || 92) : png);
     const { width, height } = img.getSize();
     const icon = width >= height ? img.resize({ width: Math.min(width, 128) }) : img.resize({ height: Math.min(height, 128) });
+    const win = BrowserWindow.fromWebContents(e.sender);
+    // Returns once the mouse button has been released.
     e.sender.startDrag({ file, icon });
+    if (win && !win.isDestroyed() && droppedInAnotherApp()) win.close();
   });
 
   // Pinned screenshots ----------------------------------------------------------------------

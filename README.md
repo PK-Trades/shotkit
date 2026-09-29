@@ -22,6 +22,7 @@ A CleanShot X–style screenshot tool for Windows, built with Electron + TypeScr
   - Zoom with Ctrl+scroll, Ctrl+plus/minus, Ctrl+0 (fit) and Ctrl+1 (100%). Hold Space and drag to pan.
   - **Redact** finds emails, phone numbers, card numbers, IBANs, IP addresses and API keys with OCR and blacks them out in one step.
   - **Background**: gradients, your own colour or picture, or a blurred copy of the screenshot; padding, rounded corners, shadow and a fixed size (16:9, 1:1, …). Add a macOS, Windows or browser window frame with a title or address.
+  - **Drag me**: drag the finished image out of the editor into another app, a folder or the desktop. Like Copy, dropping it into another app closes the editor (Esc, or releasing over the editor itself, keeps it open).
   - The editor remembers your last tool, colour, size and styles. Reopening a capture from history brings back its annotations, not a flattened image.
 - **Saving:** PNG, JPEG (with a quality setting) or WebP, at full resolution or at normal (1×) size on high-DPI screens. File names come from a template such as `{year}-{month}/{app} {date} at {time}`; "/" makes folders.
 - **Uploading:** to Imgur (with your own Client ID) or your own server; the link is copied to the clipboard.

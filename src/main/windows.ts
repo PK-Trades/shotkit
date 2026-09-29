@@ -5,6 +5,7 @@ import { addToHistory, HistoryItem, thumbDataUrl } from './history';
 import { appIcon } from './icon';
 import { uploadConfigured } from './upload';
 import { clamp } from './util';
+import * as win32 from './win32';
 
 export const pagePath = (page: string) => path.join(__dirname, 'renderer', page, 'index.html');
 
@@ -135,6 +136,22 @@ export function openEditor(file: string) {
     win.show();
     win.focus();
   });
+}
+
+/**
+ * Whether a drag that has just ended was dropped into another app (or onto the desktop), rather
+ * than cancelled with Esc or released over one of our own windows.
+ */
+export function droppedInAnotherApp(): boolean {
+  try {
+    if (win32.escapeDown()) return false;
+    const p = screen.dipToScreenPoint(screen.getCursorScreenPoint());
+    const pid = win32.processAt(p.x, p.y);
+    return pid !== null && pid !== process.pid;
+  } catch {
+    // koffi unavailable: better to leave the editor open than to close it on a guess.
+    return false;
+  }
 }
 
 export async function openEditorFromDialog() {
