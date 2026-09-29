@@ -67,6 +67,7 @@ export const OPTIONS: Partial<Record<ShapeType, OptionGroup[]>> = {
         { id: 'double', icon: 'arrowDouble', label: 'Double-headed arrow' },
         { id: 'dashed', icon: 'arrowDashed', label: 'Dashed arrow' },
         { id: 'elbow', icon: 'arrowElbow', label: 'Elbow (right-angle) arrow' },
+        { id: 'sketch', icon: 'arrowSketch', label: 'Hand-drawn arrow' },
       ],
     },
   ],
@@ -78,6 +79,25 @@ export const OPTIONS: Partial<Record<ShapeType, OptionGroup[]>> = {
         { id: 'dashed', icon: 'lineDashed', label: 'Dashed line' },
         { id: 'dots', icon: 'lineDots', label: 'Line with dot ends' },
         { id: 'measure', icon: 'lineMeasure', label: 'Measurement line (shows its length)' },
+        { id: 'sketch', icon: 'lineSketch', label: 'Hand-drawn line' },
+      ],
+    },
+  ],
+  rect: [
+    {
+      key: 'style',
+      items: [
+        { id: 'clean', icon: 'rect', label: 'Clean rectangle' },
+        { id: 'sketch', icon: 'rectSketch', label: 'Hand-drawn rectangle' },
+      ],
+    },
+  ],
+  ellipse: [
+    {
+      key: 'style',
+      items: [
+        { id: 'clean', icon: 'ellipse', label: 'Clean ellipse' },
+        { id: 'sketch', icon: 'ellipseSketch', label: 'Hand-drawn ellipse' },
       ],
     },
   ],
@@ -88,6 +108,7 @@ export const OPTIONS: Partial<Record<ShapeType, OptionGroup[]>> = {
         { id: 'outline', icon: 'textOutline', label: 'Outlined text' },
         { id: 'plain', icon: 'text', label: 'Plain text' },
         { id: 'pill', icon: 'textPill', label: 'Text on a background' },
+        { id: 'hand', icon: 'textHand', label: 'Handwritten text' },
       ],
     },
     {
@@ -163,20 +184,48 @@ export const hasText = (t: ShapeType) => t === 'text' || t === 'callout';
 // ---------------------------------------------------------------------------------------------
 
 const FONT = '"Segoe UI", system-ui, sans-serif';
-export const font = (size: number) => `600 ${size}px ${FONT}`;
+/** Handwriting for the hand-drawn text style: Ink Free and Segoe Print come with Windows 10 and 11. */
+export const HAND_FONT = '"Ink Free", "Segoe Print", "Segoe Script", "Comic Sans MS", cursive';
+/** Handwriting sits small on its line, so it is drawn a little larger than the size it is set to. */
+export const HAND_SCALE = 1.2;
+export const font = (size: number, hand = false) =>
+  hand ? `700 ${size * HAND_SCALE}px ${HAND_FONT}` : `600 ${size}px ${FONT}`;
+export const isHand = (s: Shape) => s.type === 'text' && s.style === 'hand';
 export const LINE_HEIGHT = 1.25;
 const measureCtx = document.createElement('canvas').getContext('2d')!;
 
-export function textWidth(text: string, size: number): number {
-  measureCtx.font = font(size);
+export function textWidth(text: string, size: number, hand = false): number {
+  measureCtx.font = font(size, hand);
   return measureCtx.measureText(text).width;
+}
+
+const baselines = new Map<string, number>();
+
+/**
+ * How far down its line the baseline of `font` sits when lines are `lh` tall, as the browser lays
+ * it out. Drawing text there puts it exactly where the text box shows it while typing.
+ */
+export function lineBaseline(fontCss: string, lh: number): number {
+  const key = `${fontCss}|${lh}`;
+  let v = baselines.get(key);
+  if (v === undefined) {
+    const line = document.createElement('div');
+    line.style.cssText = `position:absolute;visibility:hidden;left:0;top:0;white-space:pre;font:${fontCss};line-height:${lh}px`;
+    line.innerHTML = 'Hg<span style="display:inline-block;width:0;height:0"></span>';
+    document.body.appendChild(line);
+    // The empty inline block rests on the baseline.
+    v = (line.lastElementChild as HTMLElement).getBoundingClientRect().top - line.getBoundingClientRect().top;
+    line.remove();
+    baselines.set(key, v);
+  }
+  return v;
 }
 
 /** Sets a text or callout shape's size from its text. */
 export function measureText(s: Shape, text = s.text ?? '') {
   const lines = text.split('\n');
   const min = s.type === 'callout' || s.style === 'pill' ? s.width : 1;
-  s.w = Math.max(...lines.map((l) => textWidth(l, s.width)), min);
+  s.w = Math.max(...lines.map((l) => textWidth(l, s.width, isHand(s))), min);
   s.h = lines.length * s.width * LINE_HEIGHT;
 }
 

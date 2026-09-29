@@ -14,7 +14,8 @@ A CleanShot X–style screenshot tool for Windows, built with Electron + TypeScr
 - **Annotation editor:**
   - Tools: arrow, line, rectangle, ellipse, text, callout, pen, highlighter, blur, pixelate, solid redaction, spotlight, magnifier, numbered steps, stamps and crop.
   - **Arrows**: standard, tapered, open, double-headed, dashed and elbow (right-angle). Drag the round middle handle to curve an arrow or line. **Lines** can be dashed, have dot ends, or be a measurement line that shows its length.
-  - **Text** can be outlined, plain or on a coloured pill, aligned left, centre or right. **Callouts** are speech bubbles: drag from what you point at to where the bubble goes, then type.
+  - **Hand-drawn style**: arrows, lines, rectangles and ellipses can be drawn like a marker pen (wobbly strokes, an ellipse that loops past where it started, an open two-stroke arrowhead), and text can be handwritten. Pick it in the style buttons next to each tool; the choice is remembered per tool.
+  - **Text** can be outlined, plain, handwritten or on a coloured pill, aligned left, centre or right. **Callouts** are speech bubbles: drag from what you point at to where the bubble goes, then type.
   - **Numbered steps** count 1-2-3, A-B-C or i-ii-iii and renumber when one is deleted. **Stamps**: ✅ ❌ ⚠️ ⭐ ❤️ ❓ 👍 and a mouse pointer. The **magnifier** enlarges any spot; drag its round handle to choose what it shows.
   - Colours: eight presets, your own (+), and an eyedropper that picks from anywhere on screen. Opacity slider and four sizes.
   - Select several shapes (drag a box or Shift+click), move them together, copy/paste/duplicate, bring to front or send to back (right-click for a menu), and nudge with the arrow keys. Shapes snap to each other's edges and centres (hold Alt to place freely).

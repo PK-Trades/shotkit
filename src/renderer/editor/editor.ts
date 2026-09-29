@@ -12,9 +12,12 @@ import {
   handles,
   hasText,
   hasTextBox,
+  HAND_FONT,
+  HAND_SCALE,
   HIGHLIGHTER_DEFAULT,
   hit,
   isBox,
+  isHand,
   isLine,
   LINE_HEIGHT,
   measureText,
@@ -411,7 +414,12 @@ function positionTextInput() {
   const st = stage.getBoundingClientRect();
   textInput.style.left = `${p.x - st.left + stage.scrollLeft - 1}px`;
   textInput.style.top = `${p.y - st.top + stage.scrollTop - 1}px`;
-  textInput.style.fontSize = `${s.width * k}px`;
+  const hand = isHand(s);
+  textInput.style.fontSize = `${s.width * k * (hand ? HAND_SCALE : 1)}px`;
+  textInput.style.fontFamily = hand ? HAND_FONT : '';
+  textInput.style.fontWeight = hand ? '700' : '';
+  // The enlarged handwriting must not stretch the lines apart.
+  textInput.style.lineHeight = hand ? `${s.width * LINE_HEIGHT * k}px` : '';
   const boxed = hasTextBox(s);
   textInput.style.color = boxed ? contrast(s.color) : s.color;
   textInput.style.textAlign = s.align ?? 'left';
@@ -424,7 +432,7 @@ function autosizeText() {
   const s = editing.shape;
   const k = viewScale();
   const lines = textInput.value.split('\n');
-  const w = Math.max(...lines.map((l) => textWidth(l, s.width)), s.width);
+  const w = Math.max(...lines.map((l) => textWidth(l, s.width, isHand(s))), s.width);
   textInput.style.width = `${w * k + s.width * k * 0.8 + 4}px`;
   textInput.style.height = `${lines.length * s.width * LINE_HEIGHT * k + 2}px`;
   if (hasTextBox(s) || s.align === 'center' || s.align === 'right') {

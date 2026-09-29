@@ -13,7 +13,8 @@ import {
   slicePath,
   textBox,
 } from './geometry';
-import { font, hasTextBox, LINE_HEIGHT, textWidth } from './shapes';
+import { font, hasTextBox, isHand, LINE_HEIGHT, lineBaseline, textWidth } from './shapes';
+import { outline, sketchArrow, sketchEllipse, sketchLine, sketchRect, Stroke } from './sketch';
 import { Background, Doc, P, Rect, Shape } from './types';
 
 /** Called when something drawn asynchronously (a background picture) becomes available. */
@@ -102,6 +103,31 @@ function strokeSmooth(c: CanvasRenderingContext2D, pts: P[]) {
   c.stroke();
 }
 
+/** Fills hand-drawn strokes as one shape, so that where they overlap they don't darken under opacity. */
+function fillStrokes(c: CanvasRenderingContext2D, strokes: Stroke[]) {
+  c.beginPath();
+  for (const st of strokes) {
+    outline(st).forEach((p, i) => (i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)));
+    c.closePath();
+  }
+  c.fill();
+}
+
+/** A rectangle or ellipse drawn by hand. A fill goes under the outline, and only it casts a shadow. */
+function drawSketchBox(c: CanvasRenderingContext2D, s: Shape, shadow: () => void) {
+  const box = norm(s);
+  const g = s.type === 'ellipse' ? sketchEllipse(box, s.width, s.id, env.unit, s.filled) : sketchRect(box, s.width, s.id, env.unit);
+  if (s.filled) {
+    shadow();
+    c.beginPath();
+    g.fill.forEach((p, i) => (i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)));
+    c.closePath();
+    c.fill();
+    c.shadowColor = 'transparent';
+  }
+  fillStrokes(c, g.strokes);
+}
+
 /** A shaft that widens from a thin tail to the arrowhead. */
 function fillTapered(c: CanvasRenderingContext2D, pts: P[], width: number) {
   const total = pathLength(pts);
@@ -158,6 +184,7 @@ function drawArrow(c: CanvasRenderingContext2D, s: Shape) {
   const len = pathLength(pts);
   if (len < 1) return;
   const style = s.style ?? 'solid';
+  if (style === 'sketch') return fillStrokes(c, sketchArrow(pts, s.width, s.id, env.unit));
   const double = style === 'double';
   const open = style === 'open';
   const head = Math.min(len * (double ? 0.4 : 0.7), Math.max(s.width * 3.4, 12 * env.unit));
@@ -196,6 +223,7 @@ function label(c: CanvasRenderingContext2D, text: string, x: number, y: number, 
 function drawLine(c: CanvasRenderingContext2D, s: Shape) {
   const pts = linePoints(s);
   const style = s.style ?? 'plain';
+  if (style === 'sketch') return fillStrokes(c, [sketchLine(pts, s.width, s.id, env.unit)]);
   if (style === 'dashed') c.setLineDash([s.width * 1.5, s.width * 2.5]);
   strokePath(c, pts);
   c.setLineDash([]);
@@ -233,18 +261,23 @@ function drawLine(c: CanvasRenderingContext2D, s: Shape) {
 // Text, callouts, stamps and magnifiers
 // ---------------------------------------------------------------------------------------------
 
-function drawTextLines(c: CanvasRenderingContext2D, s: Shape, outline: boolean) {
+function drawTextLines(c: CanvasRenderingContext2D, s: Shape, outlined: boolean) {
   const lh = s.width * LINE_HEIGHT;
   const off = (lh - s.width) / 2;
-  c.font = font(s.width);
+  const hand = isHand(s);
+  c.font = font(s.width, hand);
   c.textBaseline = 'top';
+  // Handwriting sits on the baseline the text box gives it while typing, so that the text
+  // doesn't jump when it is committed.
+  const baseline = hand ? lineBaseline(c.font, lh) : 0;
+  if (hand) c.textBaseline = 'alphabetic';
   c.lineWidth = Math.max(2, s.width * 0.18);
   c.strokeStyle = isLight(s.color) ? 'rgba(0,0,0,0.85)' : '#ffffff';
   (s.text ?? '').split('\n').forEach((line, i) => {
-    const lw = textWidth(line, s.width);
+    const lw = textWidth(line, s.width, hand);
     const x = s.align === 'center' ? s.x + (s.w - lw) / 2 : s.align === 'right' ? s.x + s.w - lw : s.x;
-    const y = s.y + i * lh + off;
-    if (outline) c.strokeText(line, x, y);
+    const y = s.y + i * lh + (hand ? baseline : off);
+    if (outlined) c.strokeText(line, x, y);
     c.fillText(line, x, y);
   });
 }
@@ -358,6 +391,10 @@ export function drawShape(c: CanvasRenderingContext2D, s: Shape) {
       break;
     case 'rect': {
       shadow();
+      if (s.style === 'sketch') {
+        drawSketchBox(c, s, shadow);
+        break;
+      }
       const r = norm(s);
       c.beginPath();
       c.roundRect(r.x, r.y, r.w, r.h, Math.min(s.width, r.w / 2, r.h / 2));
@@ -367,6 +404,10 @@ export function drawShape(c: CanvasRenderingContext2D, s: Shape) {
     }
     case 'ellipse': {
       shadow();
+      if (s.style === 'sketch') {
+        drawSketchBox(c, s, shadow);
+        break;
+      }
       const r = norm(s);
       c.beginPath();
       c.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
@@ -411,7 +452,11 @@ export function drawShape(c: CanvasRenderingContext2D, s: Shape) {
       if (hasTextBox(s)) {
         shadow();
         drawTextBox(c, s);
-      } else drawTextLines(c, s, s.style !== 'plain');
+      } else {
+        // Handwriting is drawn plain, with just the soft shadow the other hand-drawn shapes have.
+        if (isHand(s)) shadow();
+        drawTextLines(c, s, s.style !== 'plain' && !isHand(s));
+      }
       break;
     case 'callout':
       shadow();
